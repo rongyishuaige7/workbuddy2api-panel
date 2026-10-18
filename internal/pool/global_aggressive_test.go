@@ -78,26 +78,6 @@ func TestGlobalRecoveryLeaseUsesShortInterval(t *testing.T) {
 	}
 }
 
-// TestGlobal6004CappedByBase global 6004 的本地模型锁以 base 为上限，
-// 上游 resetAt 仅作展示；避免把仍可用的 global 账号锁到几小时后。
-func TestGlobal6004CappedByBase(t *testing.T) {
-	p := New("")
-	uid := addAggressiveTestAccount(t, p, "global")
-	reset := time.Now().Add(6 * time.Hour)
-	p.CooldownSoftForModel(uid, 10*time.Second, reset, "deepseek-v4.1-flash", "6004 model rate limit")
-	st, _ := p.Status(uid)
-	if len(st.RateLimitedModels) != 1 {
-		t.Fatalf("rate_limited_models=%+v", st.RateLimitedModels)
-	}
-	rl := st.RateLimitedModels[0]
-	if rem := time.Until(rl.Until); rem < 8*time.Second || rem > 12*time.Second {
-		t.Fatalf("global 6004 until=%s want ~10s", rem)
-	}
-	if rl.ResetAt.Sub(reset) > time.Second || reset.Sub(rl.ResetAt) > time.Second {
-		t.Fatalf("global 6004 reset_at=%s want %s", rl.ResetAt, reset)
-	}
-}
-
 // TestCN6004HonorsReset CN 6004 仍按上游重置时间（这里 30m，未触发 2h 封顶）。
 func TestCN6004HonorsReset(t *testing.T) {
 	p := New("")

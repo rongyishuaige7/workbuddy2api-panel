@@ -365,7 +365,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
 | `cooldown.soft_rate` | `600s` | CN 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
-| `cooldown.global_soft_rate` | `10s` | global 域 429/14003 的账号级冷却基数，以及 global 6004 模型锁的本地重试上限；`0` = 不冷却。上游 resetAt 仍保留展示，但不再把 global 账号锁几小时 |
+| `cooldown.global_soft_rate` | `10s` | global 域 429/14003 的账号级冷却基数；`0` = 不冷却。global 6004 仍按上游 resetAt 锁定（2026-10-18 复盘：10s 短锁会反复撞 6004，已回退） |
 | `cooldown.global_waf_rate` | `5s` | global 域 WAF 403 的账号级冷却基数；`0` = 不冷却。WAF 是请求/IP 维度，短冷却优先保可用性 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
 | `schedule.travel_hours` | `[9, 21]` | 每日本地时区整点推进猫猫旅行状态机（领养 / 派出 / 领奖） |
@@ -504,7 +504,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 **软冷却指数退避**（与熔断器并存的第二条升级线）：软限流的**冷却时长**本身也按连续次数退避——同一账号连续触发软冷却时 `soft_rate × 2^(连续次数-1)`，封顶 `soft_rate_max`。global 域的基数不是 `soft_rate`，而是 `cooldown.global_soft_rate`（429/14003）与 `cooldown.global_waf_rate`（WAF），两者默认 10s/5s，显式 `0` 关闭。计数 `soft_streak` 独立于熔断器的 `fails`，只在**成功**或**签到解冻**时清零，随 `state.json` 持久化。
 
-国际版遇到 WAF 403 时，先在**同一请求内**把 `/console/chat/completions` 换成 `/v2/chat/completions` 再试一次（两者带首条 system 时实测均可 200），仍失败才避让失败账号，在既有 `MaxRotate`（默认 3 次）内有限换号；多个账号 WAF 不再直接解释为整个出口 IP 被封，也不影响 CN 的 WAF 止损窗口。global 的 429/14003 与 WAF 使用独立短冷却（默认 10s / 5s，`0` = 不冷却）：剩余冷却不超过 30s 的账号允许在 3 秒节流后做恢复试探，避免一次瞬时拒绝把整池锁成 503；剩余冷却超过 30s 的账号级 429/WAF 仍必须等待；global 6004 的本地模型锁也以 `global_soft_rate` 为上限，上游 resetAt 仅展示（实测 global 6004 稍后的小/中等请求可恢复，CN 6004 则连测活都拦）。`Retry-After` 不受未知限流退避的两小时封顶截短。
+国际版遇到 WAF 403 时，先在**同一请求内**把 `/console/chat/completions` 换成 `/v2/chat/completions` 再试一次（两者带首条 system 时实测均可 200），仍失败才避让失败账号，在既有 `MaxRotate`（默认 3 次）内有限换号；多个账号 WAF 不再直接解释为整个出口 IP 被封，也不影响 CN 的 WAF 止损窗口。global 的 429/14003 与 WAF 使用独立短冷却（默认 10s / 5s，`0` = 不冷却）：剩余冷却不超过 30s 的账号允许在 3 秒节流后做恢复试探，避免一次瞬时拒绝把整池锁成 503；剩余冷却超过 30s 的账号级 429/WAF 仍必须等待；global 6004 仍按上游 resetAt 锁定，CN 同样按 resetAt 并保留 2h 封顶（2026-10-18 曾尝试 global 10s 短锁，78 分钟内四个账号各 118–131 次 6004、98 次顶层 429，已回退）。`Retry-After` 不受未知限流退避的两小时封顶截短。
 
 **global 14003 的特殊处理**：上游对超大请求/连续请求常返回 `429 code=14003 too many requests`，响应没有 `Retry-After` 或重置文案。此前它按 CN 的 `soft_rate=600s` 冷却，一次大请求就会把一个账号锁 10 分钟，轮转几轮后整池 503。现在 global 无重置时间时使用 `cooldown.global_soft_rate`（默认 10s，`0` 关闭），并允许 3 秒节流后的恢复试探；上游明确给出重置时间时仍按该时间冷却。CN 行为不变。
 
@@ -873,7 +873,7 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 上游 `429` + `code 6004` 是**该模型的使用量超限**（msg 通常带「将在 YYYY-MM-DD HH:MM:SS UTC+8 重置」），**不是账号整体被限流**。网关的处理：
 
-- **按模型记录重置时间**：msg 带「将在 … 重置」时，按 UTC+8 解释并保存该模型的恢复时间。global 的本地路由锁默认只锁 `global_soft_rate`（10s），resetAt 只用于面板展示；CN 仍按重置时间冷却并保留 `soft_rate_max`（默认 2h）封顶。实测 global 6004 对稍后的小/中等请求可恢复，CN 6004 会连测活小请求一起拦，故两者策略不同
+- **按模型记录重置时间**：msg 带「将在 … 重置」时，按 UTC+8 解释并保存该模型的恢复时间。global 与 CN 都按上游 resetAt 锁定；CN 额外保留 `soft_rate_max`（默认 2h）封顶。2026-10-18 曾尝试把 global 6004 压到 10s 本地锁，但 78 分钟内四个账号各命中 118–131 次 6004、产生 98 次顶层 429，说明该 6004 是持续性单账号模型频率限制，短锁只会反复撞墙，已回退为长锁
 - **切模型立即可用**：冷却由 6004 触发时会记录触发模型；同一账号改用**其他模型**请求时视为可用。同模型或未记录模型的冷却回到现状
 - **退回指数退避**：6004 无「将在 … 重置」文案，或非 6004 的普通软限流 → 仍是 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）
 

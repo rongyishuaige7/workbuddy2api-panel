@@ -89,10 +89,8 @@
 
 现场 05:52:58 的 503 不是冷却：同一 12 条消息的请求在 `/console/chat/completions` 上被 WAF 403，三个账号全部返回 HTML WAF 页面；而 7 秒前的 9 条消息请求成功。2026-10-18 小请求实测：带首条 system 时 `/console` 与 `/v2` 均 200，`workbuddy.ai` 裸域返回官网 HTML。故在 global WAF 403 时，同请求体先回退到 `/v2/chat/completions` 再试一次；只对 `ErrWafBlock` 生效，其他 4xx 立即返回。该回退不改变账号冷却策略，只多给一次路径机会；若 `/v2` 仍 WAF，仍按账号冷却/换号处理。验证：upstream 单测断言路径序列 `/console` → `/v2` 且成功不冷却；server WAF 轮转测试更新为每账号两次路径尝试。
 
-### global 6004 本地锁与 CN 的差异（2026-10-18）
+### global 6004 短锁尝试与回退（2026-10-18）
 
-现场 06:38 的 global 6004 在 10 分钟后对同一账号的小请求和 81KB `/console` 请求均返回 200；CN 账号 06:47/06:48 的测活仍返回 6004。说明 global 6004 是短时/请求形态相关的频率限制，CN 6004 更接近账号模型级硬限。此前 global 6004 按上游 resetAt 锁数小时，过度排除了仍可用账号。
+初次实测：06:50 对 79926bd6 的小请求与 81KB `/console` 请求均 200，CN 平淡测活 6004；据此把 global 6004 的本地锁压到 `global_soft_rate`（10s），resetAt 仅展示。
 
-本增量：`CooldownSoftForModel` 对 global 的 `Until` 以传入 base（`cooldown.global_soft_rate`，默认 10s）为上限，`ResetAt` 保留上游时间仅展示；base=0 不本地冷却。CN 行为不变。`statusOf` 只在账号级 cooling/disabled 时透出 reason，避免过期 429 文案与活跃模型锁并列。面板对“账号可用但有模型锁”追加「模型限流」标签。另修正 WAF `/v2` 回退：若 `/v2` 返回 11-128/11101，保留原始 WAF 让 handler 轮转，不把 403 变成 400。
-
-验证：global/CN 6004 until、resetAt 展示、过期 reason 隐藏、WAF 回退成功与回退渠道错误保留 WAF；全量 test/vet/race 通过。线上 79926bd6 的 tiny/81KB `/console` 实测 200，CN fb536fb2 测活 6004 保留。
+复盘：06:58–08:16 的 814 条 global 请求中，四个 global 账号各命中 118–131 次 6004，只有 289c5890/bfb1c8a7 两个账号 0 次 6004；产生 98 次顶层 429、11 次 503。10s 短锁让选号每 10s 重新选回已限流账号，单个请求最多 3 次尝试经常全撞 6004，反而放大 429。结论：global 6004 是持续性单账号模型频率限制，不是瞬时抖动；恢复为按上游 resetAt 锁定，让选号避开这些账号。CN 行为不变（resetAt + 2h 封顶）。保留 `statusOf` 旧 reason 隐藏与面板「模型限流」标签，避免“可用 + 429 + 模型限流”并列。
