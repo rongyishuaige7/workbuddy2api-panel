@@ -937,6 +937,11 @@ const refreshTokenExpiresInMax = 10 * 365 * 24 * time.Hour
 //   - 写回前重新校验快照一致性：若锁外期间另一 goroutine 已完成刷新（refreshToken
 //     已变），本次结果直接采用（新 token 已生效），不再重复写回。
 func (c *Client) RefreshToken(a *auth.Auth) error {
+	return c.RefreshTokenContext(context.Background(), a)
+}
+
+// RefreshTokenContext 支持调用方取消，同时保留刷新 I/O 的最长时限。
+func (c *Client) RefreshTokenContext(parent context.Context, a *auth.Auth) error {
 	// 第 1 段（锁内）：读快照。
 	a.Lock()
 	rtSnapshot := a.RefreshToken
@@ -947,7 +952,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	}
 
 	endpoint := c.chatBase(a) + "/v2/plugin/auth/token/refresh"
-	ctx, cancel := context.WithTimeout(context.Background(), refreshIOTimeout)
+	ctx, cancel := context.WithTimeout(parent, refreshIOTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {

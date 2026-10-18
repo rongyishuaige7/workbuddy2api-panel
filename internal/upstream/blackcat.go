@@ -7,9 +7,9 @@
 package upstream
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -50,15 +50,21 @@ func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
 			"messages": []map[string]any{{"role": "user", "content": "1+1等于几？直接回答。"}},
 			"stream":   true,
 		})
-		rc, status, respBody, err := c.ChatStream(a, body, "", ChatMeta{})
+		chatCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		rc, status, respBody, err := c.ChatStreamContext(chatCtx, a, body, "", ChatMeta{})
 		if err != nil || status >= 400 {
+			cancel()
 			if rc != nil {
 				rc.Close()
 			}
 			return ok, fmt.Errorf("第 %d 次对话失败: http=%d err=%v body=%.120s", i+1, status, err, respBody)
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<20))
+		_, readErr := ReadProbeResponse(rc)
 		rc.Close()
+		cancel()
+		if readErr != nil {
+			return ok, fmt.Errorf("第 %d 次对话结果: %w", i+1, readErr)
+		}
 		if err := c.ReportChatActivityModel(a, fmt.Sprintf("wb2api-night-%d-%d", time.Now().UnixMilli(), i), "", "glm-5.2", "GLM-5.2"); err != nil {
 			return ok, fmt.Errorf("第 %d 次上报失败: %w", i+1, err)
 		}

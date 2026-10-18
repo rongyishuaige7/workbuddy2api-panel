@@ -49,7 +49,12 @@ func (s *Scheduler) RunBlackcatNow() {
 		if need <= 0 {
 			continue
 		}
-		ok, err := s.cfg.Upstream.RunNightChats(a, int(need))
+		lease := s.cfg.Pool.AcquireLease(a.UID)
+		if lease == nil {
+			continue
+		} // 前台请求已占满名额，下轮排程再试
+		ok, err := s.cfg.Upstream.RunNightChats(lease.Auth, int(need))
+		lease.Release()
 		if err != nil {
 			log.Printf("blackcat %s: %d/%d 完成，中断: %v", logfmt.Label(a.UID, a.Nickname), ok, need, err)
 			continue

@@ -3,6 +3,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -143,9 +144,29 @@ func (p *Panel) runAccountProbe(ctx context.Context, a *auth.Auth, model string)
 		return res
 	}
 
+	if err := ctx.Err(); err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	if p.cfg.Pool == nil {
+		res.Error = "account pool not configured"
+		return res
+	}
+	lease := p.cfg.Pool.AcquireLease(a.UID)
+	if lease == nil {
+		res.Status = http.StatusTooManyRequests
+		res.Error = "account concurrency limit reached"
+		return res
+	}
+	defer lease.Release()
+	a = lease.Auth
+
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
 	// 临近过期先尝试刷新 token
 	if a.NeedsRefresh(time.Minute) {
-		if err := p.cfg.Upstream.RefreshToken(a); err != nil {
+		if err := p.cfg.Upstream.RefreshTokenContext(probeCtx, a); err != nil {
 			res.Error = "token refresh failed: " + err.Error()
 			return res
 		}
@@ -170,9 +191,6 @@ func (p *Panel) runAccountProbe(ctx context.Context, a *auth.Auth, model string)
 		return res
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
 	start := time.Now()
 	rc, status, respBody, err := p.cfg.Upstream.ChatStreamContext(probeCtx, a, body, "", upstream.ChatMeta{})
 	res.LatencyMs = time.Since(start).Milliseconds()
@@ -185,35 +203,30 @@ func (p *Panel) runAccountProbe(ctx context.Context, a *auth.Auth, model string)
 			res.Snippet = cleanSnippet(string(respBody))
 		}
 	} else if status >= 400 {
-		if len(respBody) > 0 {
-			res.Snippet = cleanSnippet(string(respBody))
-			res.Error = fmt.Sprintf("HTTP %d: %s", status, res.Snippet)
-		} else {
-			res.Error = fmt.Sprintf("HTTP %d", status)
-		}
+		res.Snippet = cleanSnippet(string(respBody))
+		res.Error = fmt.Sprintf("HTTP %d: %s", status, res.Snippet)
 	} else if rc != nil {
 		defer rc.Close()
-		buf := make([]byte, 1024)
-		n, _ := rc.Read(buf)
-		if n > 0 {
-			streamChunk = string(buf[:n])
-			res.Snippet = cleanSnippet(streamChunk)
-		}
-		if upstream.IsModelRateLimit(streamChunk) || strings.Contains(streamChunk, `"code":6004`) || strings.Contains(streamChunk, `"code": 6004`) {
-			res.OK = false
-			res.Error = res.Snippet
-		} else if res.Snippet == "" {
-			res.Snippet = "HTTP 200 流式连接正常"
-			res.OK = true
+		text, readErr := upstream.ReadProbeResponse(rc)
+		if readErr != nil {
+			res.Error = readErr.Error()
+			var ue *upstream.Error
+			if errors.As(readErr, &ue) {
+				streamChunk = ue.Msg
+				res.Snippet = cleanSnippet(ue.Msg)
+			}
 		} else {
 			res.OK = true
+			res.Snippet = "回复: " + text
 		}
+	} else {
+		res.Error = "upstream returned no response body"
 	}
 
 	// 统一排查 6004 模型限流与官方恢复重置时刻
 	checkStr := strings.Join([]string{string(respBody), res.Error, res.Snippet, streamChunk}, " ")
-	is6004 := upstream.IsModelRateLimit(checkStr) || strings.Contains(checkStr, "6004")
-	if resetAt, ok := upstream.ParseRateReset(checkStr); ok {
+	is6004 := !res.OK && upstream.IsModelRateLimit(string(respBody)+streamChunk)
+	if resetAt, ok := upstream.ParseRateReset(checkStr); ok && is6004 {
 		res.ResetAt = resetAt.Format(time.RFC3339)
 		rem := int64(time.Until(resetAt).Seconds())
 		if rem < 0 {

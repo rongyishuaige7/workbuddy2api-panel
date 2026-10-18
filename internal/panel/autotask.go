@@ -25,7 +25,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/rand/v2"
 	"net/http"
@@ -794,6 +793,15 @@ func runFirstBuddy(p *Panel, a *auth.Auth) (string, error) {
 // runModelChat 完成 Model_chat_GLM5.2：accept → 真实对话 → 对齐模型上报。
 func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 	const code, modelID, modelName = "Model_chat_GLM5.2", "glm-5.2", "GLM-5.2"
+	if p.cfg.Pool == nil {
+		return "", fmt.Errorf("account pool not configured")
+	}
+	lease := p.cfg.Pool.AcquireLease(a.UID)
+	if lease == nil {
+		return "", fmt.Errorf("account concurrency limit reached")
+	}
+	defer lease.Release()
+	a = lease.Auth
 	// 1. accept（报名；失败不阻塞——行为事件才是判据）
 	if err := p.cfg.Upstream.AcceptTasks(a, []string{code}); err != nil {
 		log.Printf("panel: accept %s: %v（继续走行为链路）", code, err)
@@ -807,17 +815,24 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 		},
 		"stream": true,
 	})
-	rc, status, respBody, err := p.cfg.Upstream.ChatStream(a, body, "", upstream.ChatMeta{})
+	chatCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	rc, status, respBody, err := p.cfg.Upstream.ChatStreamContext(chatCtx, a, body, "", upstream.ChatMeta{})
 	if err != nil {
 		return "", fmt.Errorf("对话请求: %w", err)
 	}
 	if status >= 400 {
-		rc.Close()
+		if rc != nil {
+			rc.Close()
+		}
 		return "", fmt.Errorf("对话失败 http=%d: %s", status, truncateStr(string(respBody), 160))
 	}
 	// 读干 SSE（网关对上游强制 flow：不读完会残留连接）
-	_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<20))
+	_, readErr := upstream.ReadProbeResponse(rc)
 	rc.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("对话结果: %w", readErr)
+	}
 	time.Sleep(reportGap)
 	// 3. 对齐模型的上报（触发进度）
 	if err := p.cfg.Upstream.ReportChatActivityModel(a, fmt.Sprintf("wb2api-glm52-%d", time.Now().UnixMilli()), "", modelID, modelName); err != nil {
@@ -894,6 +909,15 @@ func runBlackCat(p *Panel, a *auth.Auth) (string, error) {
 	if need <= 0 {
 		return "进度已达标，无需补足", nil
 	}
+	if p.cfg.Pool == nil {
+		return "", fmt.Errorf("account pool not configured")
+	}
+	lease := p.cfg.Pool.AcquireLease(a.UID)
+	if lease == nil {
+		return "", fmt.Errorf("account concurrency limit reached")
+	}
+	defer lease.Release()
+	a = lease.Auth
 	ok, err := p.cfg.Upstream.RunNightChats(a, int(need))
 	if err != nil {
 		return fmt.Sprintf("完成 %d/%d 次后中断: %v", ok, need, err), nil

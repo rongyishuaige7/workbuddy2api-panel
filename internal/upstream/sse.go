@@ -145,8 +145,8 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			return nil, err
 		}
 		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			payload := strings.TrimPrefix(line, "data: ")
+		if strings.HasPrefix(line, "data:") {
+			payload := strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
 			if payload == "[DONE]" {
 				// 上游显式结束：停止读取，DONE 之后的任何数据一律忽略。
 				sawDone = true
@@ -717,12 +717,12 @@ readLoop:
 		line, err := br.ReadString('\n')
 		trimmed := strings.TrimRight(line, "\r\n")
 		switch {
-		case strings.HasPrefix(trimmed, "data: [DONE]"):
+		case strings.HasPrefix(trimmed, "data:") && strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")) == "[DONE]":
 			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
 			// [DONE] 统一在循环结束后写出，保证恰好一个。
 			break readLoop
-		case strings.HasPrefix(trimmed, "data: "):
-			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
+		case strings.HasPrefix(trimmed, "data:"):
+			n, werr := writeFrame(strings.TrimPrefix(strings.TrimPrefix(trimmed, "data:"), " "))
 			validFrames += n
 			if werr != nil {
 				return werr

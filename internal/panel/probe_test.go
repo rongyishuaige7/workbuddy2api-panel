@@ -1,8 +1,10 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -210,5 +212,89 @@ func TestAccountProbeEndpoint(t *testing.T) {
 		if len(resp.Results) != 2 {
 			t.Errorf("expected 2 results, got %d", len(resp.Results))
 		}
+	}
+}
+
+// 字节碎片读取模拟 role-only 首块和后续业务错误。
+type probeTransport func(*http.Request) (*http.Response, error)
+
+func (f probeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type fragmentedProbeBody struct{ raw string }
+
+func (b *fragmentedProbeBody) Read(p []byte) (int, error) {
+	if b.raw == "" {
+		return 0, io.EOF
+	}
+	p[0] = b.raw[0]
+	b.raw = b.raw[1:]
+	return 1, nil
+}
+func (b *fragmentedProbeBody) Close() error { return nil }
+
+func TestProbeReadsCompleteResultAndHonorsLease(t *testing.T) {
+	for _, tc := range []struct {
+		name, stream string
+		ok           bool
+	}{
+		{"empty", "", false},
+		{"role only", "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\ndata:[DONE]\n\n", false},
+		{"session dead", "data:{\"code\":12153,\"msg\":\"Offline user session not found\"}\n\n", false},
+		{"late rate limit", "data:{\"choices\":[{\"delta\":{\"content\":\"1\"}}]}\n\ndata: {\"error\":{\"code\":6004,\"message\":\"daily token limit\"}}\n\n", false},
+		{"no-space data", "data:{\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata:[DONE]\n\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pl := pool.New("")
+			pl.SetMaxInFlight(1)
+			a := &auth.Auth{UID: "a", AccessToken: "test-token", ExpiresAt: 9999999999}
+			pl.Add(a)
+			calls := 0
+			up := &upstream.Client{ChatBaseCN: "https://fake.example", HTTP: &http.Client{Transport: probeTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				st, _ := pl.Status("a")
+				if st.InFlight != 1 {
+					t.Error("probe has no lease")
+				}
+				return &http.Response{StatusCode: 200, Header: http.Header{}, Body: &fragmentedProbeBody{raw: tc.stream}}, nil
+			})}}
+			pnl := New(Config{Pool: pl, Upstream: up})
+			lease := pl.AcquireLease("a")
+			res := pnl.runAccountProbe(context.Background(), a, "m")
+			if res.OK || res.Status != 429 || calls != 0 {
+				t.Fatal("full account still probed")
+			}
+			lease.Release()
+			res = pnl.runAccountProbe(context.Background(), a, "m")
+			if res.OK != tc.ok {
+				t.Fatalf("OK=%v want %v: %s", res.OK, tc.ok, res.Error)
+			}
+			st, _ := pl.Status("a")
+			if st.InFlight != 0 {
+				t.Fatal("probe leaked lease")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			res = pnl.runAccountProbe(ctx, a, "m")
+			if res.OK || calls != 1 {
+				t.Fatal("canceled probe issued request")
+			}
+		})
+	}
+}
+
+func TestModelChatTaskHonorsAccountCapacity(t *testing.T) {
+	pl := pool.New("")
+	pl.SetMaxInFlight(1)
+	a := &auth.Auth{UID: "a"}
+	pl.Add(a)
+	lease := pl.AcquireLease("a")
+	defer lease.Release()
+	up := &upstream.Client{HTTP: &http.Client{Transport: probeTransport(func(*http.Request) (*http.Response, error) {
+		t.Fatal("full account issued task request")
+		return nil, nil
+	})}}
+	pnl := New(Config{Pool: pl, Upstream: up})
+	if _, err := runModelChat(pnl, a); err == nil {
+		t.Fatal("full account accepted chat task")
 	}
 }
