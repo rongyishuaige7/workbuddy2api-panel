@@ -788,17 +788,19 @@ const (
 )
 
 // chatPaths 返回按 realm 的 chat 路径候选序列：
-// global → [/console/chat/completions]
+// global → [/console/chat/completions, /v2/chat/completions]
 // （近期上游 workbuddy.ai 在 /v2 启用了渠道校验与客户端完整性风控，针对网页 console
 //
 //	签发的凭证拦截 11128 "没通过渠道校验，可能不是官方客户端发出的"；
 //	而 /console/chat/completions 配合 ensureConsoleSystem 补齐首条 system prompt
-//	后实测 200 流式正常，故 global 切换为 /console/chat/completions 路径）。
+//	后实测 200 流式正常，故 global 首选 /console。2026-10-18 实测带首条 system
+//	消息时 /v2 同样 200；WAF 403 时把 /v2 作为同请求内的路径回退，避免一次边缘
+//	规则直接变成 503。路径回退只对 ErrWafBlock 生效，其他 4xx 立即返回）。
 //
 // cn → [/v2/chat/completions]（单元素，保持现状）。
 func (c *Client) chatPaths(a *auth.Auth) []string {
 	if c.globalOn(a) {
-		return []string{consoleChatCompletionsPath}
+		return []string{consoleChatCompletionsPath, chatCompletionsPath}
 	}
 	return []string{chatCompletionsPath}
 }
@@ -1087,7 +1089,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
-	for _, path := range c.chatPaths(a) {
+	paths := c.chatPaths(a)
+	for i, path := range paths {
 		endpoint := c.chatBase(a) + path
 		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
 		if err != nil {
@@ -1124,7 +1127,14 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
-			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链）。
+			// global WAF 403 路径回退：同一请求体改走 /v2/chat/completions 再试一次。
+			// WAF 可能按路径/边缘规则拦截；/console 被拦时 /v2 仍可能放行。只对
+			// ErrWafBlock 生效，其他 4xx 立即返回（避免把参数/渠道错误重放一遍）。
+			if kind == ErrWafBlock && i+1 < len(paths) {
+				log.Printf("WARN: [upstream] chat_stream acct=%s: WAF on %s, retry via %s",
+					logfmt.Label(a.UID, a.Nickname), path, paths[i+1])
+				continue
+			}
 			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析）：
 			// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
 			if kind == ErrNone {

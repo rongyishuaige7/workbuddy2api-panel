@@ -19,8 +19,8 @@ func TestWAFRotationScopedToRealm(t *testing.T) {
 		stream              bool
 		wantStatus, calls   int
 	}{
-		{"global_sync", "global", "www.workbuddy.ai", false, 200, 3},
-		{"global_stream", "global", "www.workbuddy.ai", true, 200, 3},
+		{"global_sync", "global", "www.workbuddy.ai", false, 200, 5},
+		{"global_stream", "global", "www.workbuddy.ai", true, 200, 5},
 		{"cn_unchanged", "cn", "www.codebuddy.cn", false, 503, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,7 +76,7 @@ func TestGlobalWAFRetriesAreBoundedAndIsolatedFromCN(t *testing.T) {
 	h.wafIP.noteWaf("cn2")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"global:deepseek-v4.1-flash","messages":[]}`)))
-	if calls != 3 || rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"code":"waf_blocked"`) {
+	if calls != 6 || rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"code":"waf_blocked"`) {
 		t.Fatalf("calls=%d status=%d body=%s", calls, rec.Code, rec.Body)
 	}
 	if strings.Contains(rec.Body.String(), "waf_ip_blocked") {

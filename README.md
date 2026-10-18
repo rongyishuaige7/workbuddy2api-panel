@@ -504,7 +504,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 **软冷却指数退避**（与熔断器并存的第二条升级线）：软限流的**冷却时长**本身也按连续次数退避——同一账号连续触发软冷却时 `soft_rate × 2^(连续次数-1)`，封顶 `soft_rate_max`。global 域的基数不是 `soft_rate`，而是 `cooldown.global_soft_rate`（429/14003）与 `cooldown.global_waf_rate`（WAF），两者默认 10s/5s，显式 `0` 关闭。计数 `soft_streak` 独立于熔断器的 `fails`，只在**成功**或**签到解冻**时清零，随 `state.json` 持久化。
 
-国际版遇到 WAF 403 时只避让失败账号，在既有 `MaxRotate`（默认 3 次）内有限换号；多个账号 WAF 不再直接解释为整个出口 IP 被封，也不影响 CN 的 WAF 止损窗口。global 的 429/14003 与 WAF 使用独立短冷却（默认 10s / 5s，`0` = 不冷却）：剩余冷却不超过 30s 的账号允许在 3 秒节流后做恢复试探，避免一次瞬时拒绝把整池锁成 503；剩余冷却超过 30s 或上游明确给出的重置时间仍必须等待，`Retry-After` 也不受未知限流退避的两小时封顶截短。
+国际版遇到 WAF 403 时，先在**同一请求内**把 `/console/chat/completions` 换成 `/v2/chat/completions` 再试一次（两者带首条 system 时实测均可 200），仍失败才避让失败账号，在既有 `MaxRotate`（默认 3 次）内有限换号；多个账号 WAF 不再直接解释为整个出口 IP 被封，也不影响 CN 的 WAF 止损窗口。global 的 429/14003 与 WAF 使用独立短冷却（默认 10s / 5s，`0` = 不冷却）：剩余冷却不超过 30s 的账号允许在 3 秒节流后做恢复试探，避免一次瞬时拒绝把整池锁成 503；剩余冷却超过 30s 或上游明确给出的重置时间仍必须等待，`Retry-After` 也不受未知限流退避的两小时封顶截短。
 
 **global 14003 的特殊处理**：上游对超大请求/连续请求常返回 `429 code=14003 too many requests`，响应没有 `Retry-After` 或重置文案。此前它按 CN 的 `soft_rate=600s` 冷却，一次大请求就会把一个账号锁 10 分钟，轮转几轮后整池 503。现在 global 无重置时间时使用 `cooldown.global_soft_rate`（默认 10s，`0` 关闭），并允许 3 秒节流后的恢复试探；上游明确给出重置时间时仍按该时间冷却。CN 行为不变。
 

@@ -84,3 +84,7 @@
 - `softDurationLocked` 对基数 0 直接返回 0，避免 `0` 被指数分支误当成 `soft_rate_max`。
 
 验证：配置默认/显式值/0/负值、global vs CN 429/WAF 冷却、global 短冷却兜底与 3s 节流、global 长冷却不兜底、CN 兜底不变、恢复租约间隔、测活 6004 不改路由状态；受影响包与全量 test/race/vet 通过。
+
+### global WAF 路径回退（2026-10-18）
+
+现场 05:52:58 的 503 不是冷却：同一 12 条消息的请求在 `/console/chat/completions` 上被 WAF 403，三个账号全部返回 HTML WAF 页面；而 7 秒前的 9 条消息请求成功。2026-10-18 小请求实测：带首条 system 时 `/console` 与 `/v2` 均 200，`workbuddy.ai` 裸域返回官网 HTML。故在 global WAF 403 时，同请求体先回退到 `/v2/chat/completions` 再试一次；只对 `ErrWafBlock` 生效，其他 4xx 立即返回。该回退不改变账号冷却策略，只多给一次路径机会；若 `/v2` 仍 WAF，仍按账号冷却/换号处理。验证：upstream 单测断言路径序列 `/console` → `/v2` 且成功不冷却；server WAF 轮转测试更新为每账号两次路径尝试。
