@@ -409,4 +409,3 @@ func TestTokensToday(t *testing.T) {
 		t.Fatalf("TokensToday = %d, want 5000", got)
 	}
 }
-

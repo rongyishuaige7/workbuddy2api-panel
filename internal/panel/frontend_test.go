@@ -1300,6 +1300,3 @@ process.stdout.write('OK');
 		t.Fatalf("rateLimitBadge = %s, want OK", strings.TrimSpace(string(out)))
 	}
 }
-
-
-
