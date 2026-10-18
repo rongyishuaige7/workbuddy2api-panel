@@ -12,12 +12,15 @@ data/
 /credit
 /wb2api
 /signin_bin
+/server
+/bin/
 
 # Config with secrets (use config.example.json)
 config.json
 
 # Build artifacts
 *.tmp
+*.log
 __pycache__/
 
 # Backups (contains auth tokens)

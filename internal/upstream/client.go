@@ -150,6 +150,8 @@ var accountFaultMarkers = []string{
 var contentBlockedMarkers = []string{
 	"blocked by security policy",
 	"unapproved channel",
+	"channel verification",
+	"渠道校验",
 	"illegal api invocation",
 }
 
@@ -509,6 +511,11 @@ func Classify(status int, body string) ErrKind {
 	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
+			// 排除 11128：上游 11128（渠道校验/内容拦截）的 msg 也是 "request illegal"，但业务实质是安全策略拦截，
+			// 不属于 11140 账号级授权风控终态，不得误判为账号故障罚号。
+			if m == "request illegal" && codeMarker(lower, "11128") {
+				continue
+			}
 			return ErrAccountFault
 		}
 	}
@@ -573,9 +580,12 @@ func Classify(status int, body string) ErrKind {
 			}
 		}
 	}
-	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
-	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
+	// 内容策略拦截（HTTP 400 + 审核文案 / code 11128）：判在通用 ErrClient 之前。
+	// 这是误报或渠道策略信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
 	if status >= 400 {
+		if codeMarker(lower, "11128") {
+			return ErrContentBlocked
+		}
 		for _, m := range contentBlockedMarkers {
 			if strings.Contains(lower, m) {
 				return ErrContentBlocked
@@ -735,15 +745,23 @@ func (c *Client) globalOn(a *auth.Auth) bool {
 	return c.GlobalEnabled && a != nil && a.Realm() == "global"
 }
 
-// 路径常量：CN 与 global 共用的 chat 出站路径（/v2 单路径）。
-const chatCompletionsPath = "/v2/chat/completions"
+// 路径常量：chat 出站路径。
+const (
+	chatCompletionsPath        = "/v2/chat/completions"
+	consoleChatCompletionsPath = "/console/chat/completions"
+)
 
 // chatPaths 返回按 realm 的 chat 路径候选序列：
-// global → [/v2]（#119 固定单路径：/console 挂腾讯云 WAF body 内容规则，反引号
-// printf/whoami 等命令执行特征确定性 403；/v2 同 base 不挂该规则，实测等价端点。
-// 已知取舍：若上游未来关闭 /v2，global chat 整体不可用——届时应重新启用 /console
-// 路径，此注释即"坏了再说"的锚点）；cn → [/v2]（单元素，现状）。
+// global → [/console/chat/completions]
+// （近期上游 workbuddy.ai 在 /v2 启用了渠道校验与客户端完整性风控，针对网页 console
+//  签发的凭证拦截 11128 "没通过渠道校验，可能不是官方客户端发出的"；
+//  而 /console/chat/completions 配合 ensureConsoleSystem 补齐首条 system prompt
+//  后实测 200 流式正常，故 global 切换为 /console/chat/completions 路径）。
+// cn → [/v2/chat/completions]（单元素，保持现状）。
 func (c *Client) chatPaths(a *auth.Auth) []string {
+	if c.globalOn(a) {
+		return []string{consoleChatCompletionsPath}
+	}
 	return []string{chatCompletionsPath}
 }
 
