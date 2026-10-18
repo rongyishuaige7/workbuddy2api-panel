@@ -1090,6 +1090,12 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
 	paths := c.chatPaths(a)
+	// /console WAF 后回退 /v2 时，保存原始 WAF 错误：部分账号/凭证在 /v2 会
+	// 返回 11-128 channel validation，这不是账号故障；此时必须保留原始 WAF 让
+	// handler 按 WAF 轮转/冷却，不能把 403 变成 400 渠道错误。
+	var wafFallback *Error
+	var wafFallbackRaw []byte
+	var wafFallbackStatus int
 	for i, path := range paths {
 		endpoint := c.chatBase(a) + path
 		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
@@ -1127,10 +1133,26 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+			// 回退路径若返回渠道/参数/账号授权类错误，保留原始 WAF：/v2 对部分凭证会
+			// 返回 11-128「request illegal」，这不是账号问题，也不该让 handler 按 400
+			// 终止轮转。其余错误（429/5xx）保留回退路径的新错误，信息更具体。
+			if wafFallback != nil && (kind == ErrChannel || kind == ErrBadParams || kind == ErrAccountFault || kind == ErrNone) {
+				log.Printf("WARN: [upstream] chat_stream acct=%s: fallback %s returned %s; keep original WAF",
+					logfmt.Label(a.UID, a.Nickname), path, kind)
+				return nil, wafFallbackStatus, wafFallbackRaw, wafFallback
+			}
 			// global WAF 403 路径回退：同一请求体改走 /v2/chat/completions 再试一次。
 			// WAF 可能按路径/边缘规则拦截；/console 被拦时 /v2 仍可能放行。只对
 			// ErrWafBlock 生效，其他 4xx 立即返回（避免把参数/渠道错误重放一遍）。
 			if kind == ErrWafBlock && i+1 < len(paths) {
+				if wafFallback == nil {
+					wafFallback = &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+					if d, ok := ParseRetryAfter(resp.Header); ok {
+						wafFallback.RetryAfter = d
+					}
+					wafFallbackRaw = raw
+					wafFallbackStatus = resp.StatusCode
+				}
 				log.Printf("WARN: [upstream] chat_stream acct=%s: WAF on %s, retry via %s",
 					logfmt.Label(a.UID, a.Nickname), path, paths[i+1])
 				continue

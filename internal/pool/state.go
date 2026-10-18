@@ -626,6 +626,12 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
 		st.DisabledReason = e.reason
 	}
+	// 账号级冷却已过期时 e.reason 仍是最后一次 429/WAF 的旧文案；模型级 6004
+	// 又有自己的 rate_limited_models 行。继续透出旧 reason 会让面板显示
+	// 「可用 + 429 rate limit + 模型限流」三行互相矛盾，故只在冷却/禁用时透出。
+	if !st.Cooling && !st.Disabled {
+		st.Reason = ""
+	}
 	if st.Cooling {
 		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。
 		// 常规冷却（until）与熔断期（breakerUntil）可能只有其一在生效，

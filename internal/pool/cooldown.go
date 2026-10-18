@@ -150,12 +150,25 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
 		if !resetAt.IsZero() {
-			// 有上游重置时间：冷却截止 = min(resetAt, now+softRateMax)，不做指数放大。
+			// 有上游重置时间：CN 冷却截止 = min(resetAt, now+softRateMax)，不做指数放大。
+			// global 的 6004 实测与 CN 不同：CN 6004 会连测活小请求一起拦，global 的
+			// 6004 往往只拦当时那类真实请求，稍后小/中等请求即可恢复。若仍把 global
+			// 锁到上游 resetAt（可能是几小时后），会把仍可用的账号长期排除。
+			// 因此 global 的本地模型锁以 base（global_soft_rate，默认 10s）为上限，
+			// ResetAt 仍保留上游原始时间供面板展示；base=0 表示不本地冷却。
+			until := p.softResetUntilLocked(e, now, resetAt)
+			if e.a.IsGlobal() {
+				if base <= 0 {
+					until = now
+				} else if cap := now.Add(base); until.After(cap) {
+					until = cap
+				}
+			}
 			if e.modelCooldowns == nil {
 				e.modelCooldowns = map[string]modelCooldown{}
 			}
 			e.modelCooldowns[model] = modelCooldown{
-				Until:   p.softResetUntilLocked(e, now, resetAt),
+				Until:   until,
 				ResetAt: resetAt,
 				Reason:  reason,
 			}

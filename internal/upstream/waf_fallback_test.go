@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -54,5 +55,39 @@ func TestGlobalWAFFallsBackToV2(t *testing.T) {
 	_ = rc.Close()
 	if len(paths) != 2 || paths[0] != "/console/chat/completions" || paths[1] != "/v2/chat/completions" {
 		t.Fatalf("paths=%v want [/console/chat/completions /v2/chat/completions]", paths)
+	}
+}
+
+// TestGlobalWAFFallbackChannelKeepsWAF /console WAF 后 /v2 返回 11-128 渠道错误时，
+// 必须保留原始 WAF（让 handler 轮转/冷却），不能把 403 变成 400。
+func TestGlobalWAFFallbackChannelKeepsWAF(t *testing.T) {
+	c := &Client{
+		HTTP: &http.Client{Transport: wafFallbackTransport(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path == "/console/chat/completions" {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Header:     http.Header{"Content-Type": []string{"text/html"}},
+					Body:       io.NopCloser(strings.NewReader("<html><title>WAF Block Page</title></html>")),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"code":"11-128","msg":"request illegal"}`)),
+			}, nil
+		})},
+		ChatBaseCN:     "https://fake.example",
+		ChatBaseGlobal: "https://fake.example",
+		GlobalEnabled:  true,
+	}
+	a := &auth.Auth{UID: "g", AccessToken: "token", Domain: "www.workbuddy.ai", ExpiresAt: 9999999999}
+	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	_, status, _, err := c.ChatStreamContext(context.Background(), a, body, "", ChatMeta{})
+	var ue *Error
+	if !errors.As(err, &ue) {
+		t.Fatalf("want *upstream.Error, got %v", err)
+	}
+	if status != http.StatusForbidden || ue.Kind != ErrWafBlock {
+		t.Fatalf("status=%d kind=%s want 403/%s", status, ue.Kind, ErrWafBlock)
 	}
 }

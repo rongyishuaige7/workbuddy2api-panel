@@ -110,15 +110,24 @@ func TestGlobalRealCooldownCannotBeBypassedByFallback(t *testing.T) {
 	}
 }
 
-func TestGlobalAuthoritativeResetNotTruncated(t *testing.T) {
+// TestGlobalModelLocalCapAndAccountReset global 6004 的本地模型锁以 base 为上限
+// （resetAt 仅展示）；global 账号级 429/Retry-After 仍精确遵守上游 resetAt。
+func TestGlobalModelLocalCapAndAccountReset(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "limited", Domain: "www.workbuddy.ai"})
 	p.SetSoftRateMax(time.Minute)
 	reset := time.Now().Add(6 * time.Hour)
 	p.CooldownSoftForModel("limited", time.Minute, reset, "deepseek-v4.1-flash", "6004")
 	st, _ := p.Status("limited")
-	if len(st.RateLimitedModels) != 1 || !st.RateLimitedModels[0].Until.Equal(reset) {
-		t.Fatalf("model cooldown truncated: %+v", st.RateLimitedModels)
+	if len(st.RateLimitedModels) != 1 {
+		t.Fatalf("model cooldown missing: %+v", st.RateLimitedModels)
+	}
+	rl := st.RateLimitedModels[0]
+	if rem := time.Until(rl.Until); rem < 50*time.Second || rem > 70*time.Second {
+		t.Fatalf("global model cooldown=%s want ~1m (local cap)", rem)
+	}
+	if !rl.ResetAt.Equal(reset) {
+		t.Fatalf("global model reset_at=%v want=%v", rl.ResetAt, reset)
 	}
 	p.CooldownSoftRate("limited", time.Minute, reset, "429 rate limit (retry-after)")
 	st, _ = p.Status("limited")

@@ -867,7 +867,13 @@ function renderAccounts(list) {
       const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
-    } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
+    } else {
+      tag = '<span class="tag ok">可用</span>';
+      // 账号级可用但模型级 6004 仍锁：单独标出，避免只看到「可用」误判。
+      if ((s.rate_limited_models || []).length) {
+        tag += ' <span class="tag warn" title="该账号当前模型仍受上游限流，见下方模型锁">模型限流</span>';
+      }
+    }
     let probeTag = '';
     const pr = window.probeResults && window.probeResults[s.uid];
     if (pr) {
