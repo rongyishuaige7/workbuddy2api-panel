@@ -17,6 +17,9 @@ func TestAggregateBusinessErrors(t *testing.T) {
 		{`{"error":{"code":12153,"message":"session expired"}}`, ErrSessionDead},
 		{`{"error":{"code":11128,"message":"request illegal: channel validation failed"}}`, ErrChannel},
 		{`{"error":{"message":"unknown failure"}}`, ErrClient},
+		{`{"error":{"message":"{\"code\":11128,\"msg\":\"request illegal\"}"}}`, ErrChannel},
+		{`{"error":{"message":"{\"code\":6004,\"msg\":\"daily token usage exceeds limit\"}"}}`, ErrSoftRate},
+		{`{"error":{"code":14018,"message":"exhausted"}}`, ErrHardCredit},
 		{`{"code":6004,"msg":"daily token usage exceeds limit"}`, ErrSoftRate},
 	} {
 		t.Run(tc.kind.String()+tc.payload, func(t *testing.T) {
@@ -37,5 +40,14 @@ func TestAggregateBusinessErrors(t *testing.T) {
 	}
 	if FrameError(`{"code":0,"error":null,"choices":[]}`) != nil {
 		t.Fatal("success envelope classified as error")
+	}
+}
+
+func TestEmbeddedModelRateLimitAndExactCode(t *testing.T) {
+	if !IsModelRateLimit(`{"error":{"message":"{\"code\":6004,\"msg\":\"daily limit\"}"}}`) {
+		t.Fatal("embedded rate limit lost")
+	}
+	if IsModelRateLimit(`{"code":60040,"msg":"different code"}`) {
+		t.Fatal("60040 mistaken for 6004")
 	}
 }

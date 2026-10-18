@@ -227,7 +227,6 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 分类、每个限流 body 上调用，函数体内 MustCompile 是纯浪费；错误风暴（429
 // 轰炸）时尤甚。模式串均为纯常量。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -239,7 +238,7 @@ const softRateTimeLayout = "2006-01-02 15:04:05"
 // 用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
 func IsModelRateLimit(body string) bool {
 	// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
-	return reModelRateLimit.MatchString(body)
+	return hasBusinessCode(unwrapErrorMessage(body), modelRateLimitCode)
 }
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
@@ -295,6 +294,33 @@ func IsModelBlocked(status int, body string) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(msg), modelBlockMsgMarker)
+}
+
+// unwrapErrorMessage 仅解开错误信封中的 JSON 消息；正文 choices 不参与。
+// 分类使用解开的业务字段，客户端透传仍保留原始外层信封。
+func unwrapErrorMessage(body string) string {
+	for depth := 0; depth < 4; depth++ {
+		var outer struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(body), &outer) != nil {
+			break
+		}
+		var inner map[string]json.RawMessage
+		msg := outer.Error.Message
+		if msg == "" || json.Unmarshal([]byte(msg), &inner) != nil {
+			break
+		}
+		if _, coded := inner["code"]; !coded {
+			if _, nested := inner["error"]; !nested {
+				break
+			}
+		}
+		body = msg
+	}
+	return body
 }
 
 // hasBusinessCode reports whether a JSON error envelope contains an exact
@@ -492,6 +518,7 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     连环 403。带业务信封的 403 已被上方各层捕获，走不到本层。
 //  11. 内容策略/参数错误/其他 4xx —— 通用兜底。
 func Classify(status int, body string) ErrKind {
+	body = unwrapErrorMessage(body)
 	if status >= 400 && hasBusinessCode(body, "11128") {
 		lower := strings.ToLower(body)
 		if strings.Contains(lower, "channel") || strings.Contains(body, "渠道校验") || strings.Contains(lower, "request illegal") {
@@ -528,10 +555,10 @@ func Classify(status int, body string) ErrKind {
 			return ErrAccountFault
 		}
 	}
-	// 14018 是明确的账号积分耗尽业务码。它必须先于通用 429 兜底，否则会被误判为
+	// 14018 是明确的账号积分耗尽业务码（含 SSE 的 200 业务错误）。它必须先于通用 429 兜底，否则会被误判为
 	// 可自愈的软限流并在全池冷却时反复兜底选中（issue #175）。仅按结构化 code
 	// 判定；无该 code 的 "credits exhausted" 文案仍保持普通 429 的软限流语义。
-	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
+	if hasBusinessCode(body, "14018") {
 		return ErrHardCredit
 	}
 	// status==429 先于 hardMarkers：限流响应 body 高频携带 "quota exceeded"/
