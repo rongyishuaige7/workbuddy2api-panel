@@ -377,3 +377,21 @@ func TestExtractKeyMultimodalContent(t *testing.T) {
 		t.Error("pure-image url changes must keep same derived key")
 	}
 }
+
+func TestLookupDoesNotAllocateAndConditionalUnbind(t *testing.T) {
+	r := New(Config{Available: func() []string { return []string{"a", "b"} }})
+	if _, ok := r.Lookup("s"); ok || r.Count() != 0 {
+		t.Fatal("lookup allocated a new session")
+	}
+	r.Bind("s", "a")
+	r.Bind("s", "b")
+	if r.UnbindIf("s", "a") {
+		t.Fatal("stale request unbound newer account")
+	}
+	if uid, ok := r.Lookup("s"); !ok || uid != "b" {
+		t.Fatal("new binding lost")
+	}
+	if !r.UnbindIf("s", "b") {
+		t.Fatal("matching binding was not unbound")
+	}
+}

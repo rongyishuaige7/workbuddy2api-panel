@@ -562,6 +562,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
 	stickyUID := ""
+	temporaryOffload := false
 	if h.cfg.Session != nil && sessKey != "" {
 		// 只读取已成功建立的绑定；新会话与普通请求共用 Pool 选号策略。
 		if uid, ok := h.cfg.Session.Lookup(sessKey); ok {
@@ -594,7 +595,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 幂等：stickyUID 已空则空操作；不会误解绑其他轮的绑定。仅当 Session != nil 时 stickyUID 才会非空。
 	unbindSticky := func() {
 		if stickyUID != "" {
-			h.cfg.Session.Unbind(sessKey)
+			h.cfg.Session.UnbindIf(sessKey, stickyUID)
 			stickyUID = ""
 		}
 	}
@@ -744,14 +745,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				acct = held.Auth
 			}
 			if unbind {
-				// 粘性号在当前模型不可用（冷却/该模型被 6004 限额/积分保底/软限额/无空闲时满载）或 realm 不符 → 解绑，
+				// 粘性号在当前模型不可用（冷却/该模型被 6004 限额/积分保底/软限额）或 realm 不符 → 解绑，
 				// 本次回落普通轮换。
 				unbindSticky()
 				acct = nil
 			} else if acct == nil {
-				// 粘性号正忙 (inFlight > 0) 且池内有空闲号：临时将此并发请求分流给空闲号，
+				// 粘性号繁忙且有空闲替代，或已满载：临时分流此请求，
 				// 保留会话在 SessionStore 的粘性绑定（后续串行请求继续粘性复用 prompt_cache_key），
 				// 仅在当前请求循环重试内清除本地 stickyUID，避免重试重复尝试繁忙号。
+				temporaryOffload = true
 				stickyUID = ""
 			}
 		}
@@ -1024,7 +1026,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeInterrupted
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-				if sessKey != "" && h.cfg.Session != nil {
+				if sessKey != "" && h.cfg.Session != nil && !temporaryOffload {
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
 			default:
@@ -1036,7 +1038,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-				if sessKey != "" && h.cfg.Session != nil {
+				if sessKey != "" && h.cfg.Session != nil && !temporaryOffload {
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
 			}
@@ -1108,7 +1110,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if sessKey != "" && h.cfg.Session != nil {
+		if sessKey != "" && h.cfg.Session != nil && !temporaryOffload {
 			h.cfg.Session.Bind(sessKey, acct.UID)
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。

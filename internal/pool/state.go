@@ -81,6 +81,7 @@ func (p *Pool) Revive(uid string) bool {
 	if !ok {
 		return false
 	}
+	e.nextRecovery = time.Time{}
 	e.disabled = false
 	e.paused = false // 解冻是全清：暂停选号一并解除
 	e.until = time.Time{}
@@ -174,6 +175,11 @@ func (p *Pool) NoteSuccess(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		if e.recoveryInFlight && e.coolKind == CoolSoft {
+			e.until = time.Time{}
+			e.reason = ""
+		}
+		e.nextRecovery = time.Time{}
 		e.successCount++
 		e.lastSuccess = time.Now()
 		e.fails = 0
@@ -373,8 +379,8 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 // PickStickyForModel 供会话粘性路由命中校验与直取使用。
 // 返回 (auth, unbind)：
 //   - (auth, false): 成功选中粘性号
-//   - (nil, false): 粘性号暂时繁忙 (inFlight > 0) 且池内存在其他空闲账号，分流给空闲号，不解绑会话
-//   - (nil, true): 粘性号不可用 (不存在 / realm不符 / 冷却 / 模型不可用 / 积分保底 / 软上限 / 满载且池无空闲)，需解绑
+//   - (nil, false): 粘性号暂时繁忙且有空闲替代，或已满载，临时分流，不解绑会话
+//   - (nil, true): 粘性号不可用 (不存在 / realm不符 / 冷却 / 模型不可用 / 积分保底 / 软上限)，需解绑
 func (p *Pool) PickStickyForModel(uid, model, realm string) (*auth.Auth, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -415,7 +421,7 @@ func (p *Pool) pickStickyLocked(uid, model, realm string) (*auth.Auth, bool) {
 		return nil, false
 	}
 	if p.inFlightFull(e) {
-		return nil, true
+		return nil, false
 	}
 	e.lastUsed = now
 	p.pickSeq++
@@ -610,6 +616,8 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		ModelCosts:               p.modelCostsStatusLocked(e, now),
 		ConsecutiveFails:         e.consecutiveFails,
 		DegradeUntil:             e.degradeUntil,
+		RecoveryInFlight:         e.recoveryInFlight,
+		NextRecoveryAt:           e.nextRecovery,
 		InFlight:                 int(e.inFlight.Load()),
 		BreakerFails:             e.fails,
 		BreakerUntil:             e.breakerUntil,

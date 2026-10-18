@@ -305,7 +305,10 @@ func (p *Pool) hasOtherUnderCeilingAccount(excludeUID, model, realm string) bool
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if !e.healthyForModel(now, model) || p.inFlightFull(e) {
+		if !e.healthyForModel(now, model) || p.inFlightFull(e) || p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue
+		}
+		if bound := p.byUID[excludeUID]; bound != nil && e.inFlight.Load() > bound.inFlight.Load() {
 			continue
 		}
 		if !p.tokenCeilingReached(e, model, realm) {
@@ -385,8 +388,14 @@ func (p *Pool) Acquire(uid string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e := p.byUID[uid]
-	if e == nil || p.inFlightFull(e) {
+	if e == nil || p.inFlightFull(e) || e.recoveryInFlight {
 		return false
+	}
+	if !e.healthy(time.Now()) {
+		if e.inFlight.Load() > 0 {
+			return false
+		}
+		e.recoveryInFlight = true
 	}
 	e.inFlight.Add(1)
 	return true
@@ -398,6 +407,10 @@ func (p *Pool) Release(uid string) {
 	defer p.mu.Unlock()
 	if e := p.byUID[uid]; e != nil {
 		releaseEntry(e)
+		if e.recoveryInFlight && e.inFlight.Load() == 0 {
+			e.recoveryInFlight = false
+			e.nextRecovery = time.Now().Add(recoveryProbeInterval)
+		}
 	}
 }
 

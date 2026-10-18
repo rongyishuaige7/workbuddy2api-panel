@@ -256,6 +256,19 @@ func (r *Router) Unbind(key string) bool {
 	return found
 }
 
+// UnbindIf 只解除本请求看到的旧绑定，避免失败请求删除其他并发请求刚建立的新绑定。
+func (r *Router) UnbindIf(key, uid string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[key]
+	if !ok || e.uid != uid {
+		return false
+	}
+	delete(r.entries, key)
+	r.cfg.Store.DelBind(key)
+	return true
+}
+
 // Count 返回当前绑定数（供 /status 观测）。
 func (r *Router) Count() int {
 	r.mu.RLock()

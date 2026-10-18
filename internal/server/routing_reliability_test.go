@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
@@ -93,5 +94,32 @@ func TestNewSessionUsesPoolPolicy(t *testing.T) {
 	}
 	if selected != "Bearer fake-free" {
 		t.Fatal("new-session hash allocation bypassed free-account routing policy and selected paid account")
+	}
+}
+
+func TestTemporaryOffloadPreservesBinding(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			p := testPoolWith(&auth.Auth{UID: "a", AccessToken: "fake-a", ExpiresAt: 9999999999}, &auth.Auth{UID: "b", AccessToken: "fake-b", ExpiresAt: 9999999999})
+			p.SetMaxInFlight(2)
+			p.SetCostExploreInterval(0)
+			p.NoteModelCost("a", "glm-5.2", 0, 1000)
+			p.NoteModelCost("b", "glm-5.2", 1, 1000)
+			held := p.AcquireLease("a")
+			defer held.Release()
+			s := session.New(session.Config{})
+			s.Bind("offload-session", "a")
+			chosen := ""
+			up := newFakeUpstream(t, func(a string) (int, string, bool) { chosen = a; return 200, sseOK, true })
+			h := NewHandler(Config{Pool: p, Upstream: up, Session: s})
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"model":"glm-5.2","conversation_id":"offload-session","messages":[],"stream":%v}`, stream))))
+			if w.Code != 200 || chosen != "Bearer fake-b" {
+				t.Fatalf("status=%d; offload did not select idle paid account", w.Code)
+			}
+			if uid, ok := s.Lookup("offload-session"); !ok || uid != "a" {
+				t.Fatal("temporary offload overwrote original binding")
+			}
+		})
 	}
 }

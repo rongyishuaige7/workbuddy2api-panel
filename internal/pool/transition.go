@@ -10,7 +10,7 @@
 //
 //	disabled           ← disableLocked（Disable / NoteSessionDead 达阈）
 //	until/coolKind     ← Cooldown(CoolSoft/Hard) / CooldownSoftForModel 无解析分支
-//	modelCooldowns     ← CooldownSoftForModel 有解析分支；被 disableLocked/Cooldown/clearCoolingLocked 清
+//	modelCooldowns     ← CooldownSoftForModel 有解析分支；被 disableLocked/clearCoolingLocked 清
 //	                     （reviveCoolingLocked 不清——余额恢复不构成限流解除证据）
 //	breakerUntil       ← recordBreakerFailureLocked（Cooldown/NoteError 喂入）；NoteSuccess 清
 //	softStreak         ← Cooldown(CoolSoft)/CooldownSoftForModel；NoteSuccess 清（revive 保留：与余额无关）

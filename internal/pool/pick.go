@@ -373,6 +373,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if realm != "" && e.a.Realm() != realm {
 			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底
 		}
+		if e.modelCooled(now, model) || e.recoveryInFlight || e.inFlight.Load() > 0 || now.Before(e.nextRecovery) {
+			continue
+		}
 		if e.disabled || e.paused {
 			continue // 禁用/暂停选号的账号永不参与兜底
 		}
@@ -389,7 +392,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if exp.IsZero() {
 			continue
 		}
-		if best == nil || exp.Before(best.expiry(now)) {
+		if best == nil || exp.Before(best.expiry(now)) || (exp.Equal(best.expiry(now)) && uid < best.a.UID) {
 			best = e
 		}
 	}
@@ -397,7 +400,8 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		return nil
 	}
 	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.Nickname), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
-	best.lastUsed = time.Now()
+	best.nextRecovery = now.Add(recoveryProbeInterval)
+	best.lastUsed = now
 	// 兜底同样是「选中」，必须与 pick() 正常路径、粘性命中路径（PickByUIDForModel）
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的
 	// LRU 兜底（按 usedSeq 取最旧）眼里永远是「最旧」，刚被用过就被立刻再选——
@@ -406,6 +410,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	best.usedSeq = p.pickSeq
 	return best.a
 }
+
+// recoveryProbeInterval 限制提前恢复试探，防止全池冷却时每个请求都绕过冷却。
+const recoveryProbeInterval = 30 * time.Second
 
 // inFlightFull 报告账号是否已占满在途名额（上限按 realm 分档，见 inFlightLimit；
 // limit=0 不限 → 恒 false）。调用方需已持 p.mu（读锁或写锁均可，本方法只读上限）。
