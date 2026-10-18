@@ -740,15 +740,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
+		// 选号：粘性号优先（PickStickyForModel 已校验该模型可用性 + 并发分流 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
-			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
-			if acct == nil || (realm != "" && acct.Realm() != realm) {
-				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
+			var unbind bool
+			acct, unbind = h.cfg.Pool.PickStickyForModel(stickyUID, bareModel, realm)
+			if unbind {
+				// 粘性号在当前模型不可用（冷却/该模型被 6004 限额/积分保底/软限额/无空闲时满载）或 realm 不符 → 解绑，
 				// 本次回落普通轮换。
 				unbindSticky()
 				acct = nil
+			} else if acct == nil {
+				// 粘性号正忙 (inFlight > 0) 且池内有空闲号：临时将此并发请求分流给空闲号，
+				// 保留会话在 SessionStore 的粘性绑定（后续串行请求继续粘性复用 prompt_cache_key），
+				// 仅在当前请求循环重试内清除本地 stickyUID，避免重试重复尝试繁忙号。
+				stickyUID = ""
 			}
 		}
 		if acct == nil {

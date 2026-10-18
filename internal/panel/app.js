@@ -279,6 +279,96 @@ function rateLimitRowsHtml(rows, now) {
   }).join('') + '</div>';
 }
 
+function fmtRecoveryTime(deadlineMs, nowMs) {
+  const d = new Date(deadlineMs);
+  const now = new Date(nowMs);
+  const p = n => String(n).padStart(2, '0');
+  const hm = p(d.getHours()) + ':' + p(d.getMinutes());
+
+  const isToday = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  const tmr = new Date(nowMs + 86400000);
+  const isTomorrow = d.getFullYear() === tmr.getFullYear() && d.getMonth() === tmr.getMonth() && d.getDate() === tmr.getDate();
+
+  if (isToday) return '今日 ' + hm;
+  if (isTomorrow) return '明日 ' + hm;
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + hm;
+}
+
+function accountPrimaryRateLimit(s, now) {
+  if (!s) return null;
+  // 1. 若当前有该账号的单次测活结果且捕获到 6004 重置时间
+  const pr = window.probeResults && window.probeResults[s.uid];
+  let probeRL = null;
+  if (pr && !pr.loading && pr.reset_at) {
+    const rAt = parseAPITime(pr.reset_at);
+    if (rAt > now) {
+      probeRL = {
+        model: pr.model || 'deepseek-v4.1-flash',
+        kind: 'rate_limit',
+        reset_at: pr.reset_at,
+        until: pr.reset_at,
+      };
+    }
+  }
+
+  // 2. 从池状态的 rate_limited_models 取活跃限流条目
+  const rows = Array.isArray(s.rate_limited_models) ? s.rate_limited_models.filter(r => r && r.model) : [];
+  let best = null;
+  if (rows.length) {
+    // 优先匹配用户主力模型 deepseek-v4.1-flash
+    best = rows.find(r => r.model === 'deepseek-v4.1-flash' || r.model.endsWith(':deepseek-v4.1-flash'));
+    if (!best) {
+      best = rows.find(r => r.model.includes('flash'));
+    }
+    if (!best) {
+      best = rows[0];
+    }
+  }
+
+  if (probeRL) {
+    if (!best || probeRL.model.includes('flash') || !best.model.includes('flash')) {
+      best = probeRL;
+    }
+  }
+
+  if (!best) return null;
+
+  const resetAt = parseAPITime(best.reset_at);
+  const until = parseAPITime(best.until);
+  const deadline = resetAt || until;
+  if (!deadline || deadline <= now) return null;
+
+  const remaining = Math.round((deadline - now) / 1000);
+  return {
+    model: best.model,
+    kind: best.kind || 'rate_limit',
+    resetAt,
+    until,
+    deadline,
+    remaining,
+    isFlash: best.model === 'deepseek-v4.1-flash' || best.model.endsWith(':deepseek-v4.1-flash') || best.model.includes('flash'),
+  };
+}
+
+function rateLimitBadgeHtml(rl, now) {
+  if (!rl) return '';
+  const timeStr = fmtRecoveryTime(rl.deadline, now);
+  const remStr = dur(rl.remaining);
+  const modelShort = rl.model.replace('deepseek-', 'ds-');
+  const tip = rl.model + ' 触发上游 6004 限流\n' +
+    '官方恢复时刻：' + fmtLocalDateTime(rl.deadline) + '\n' +
+    '倒计时剩余：' + remStr;
+
+  const label = (rl.isFlash ? '' : esc(modelShort) + ' ') + esc(timeStr) + ' 解封 (剩 ' + esc(remStr) + ')';
+  return '<span class="rst-tag" title="' + esc(tip) + '">' +
+    '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">' +
+      '<circle cx="8" cy="8" r="6.2"/>' +
+      '<path d="M8 4.5v3.8l2.5 1.5"/>' +
+    '</svg>' +
+    '<span>' + label + '</span>' +
+  '</span>';
+}
+
 function formatTokenCount(tokens) {
   if (tokens == null || tokens === '') return '—';
   const n = Number(tokens);
@@ -367,10 +457,400 @@ setTimeout(() => {
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
+let lastAccounts = [];
+window.probeResults = window.probeResults || {};
+
+const LS_PROBE_MODEL = 'wb_probe_model';
+
+let probeTargetUID = '';
+let probeTargetRealm = 'cn';
+let probeTargetNick = '';
+let probeSelectedModel = '';
+let probeModalInited = false;
+
+function getBareModelId(id) {
+  if (!id) return '';
+  const str = String(id);
+  if (str.startsWith('cn:') || str.startsWith('global:')) {
+    return str.slice(str.indexOf(':') + 1);
+  }
+  return str;
+}
+
+function probeRateValue(m) {
+  const raw = (m.promo_credits != null && m.promo_credits !== '') ? m.promo_credits : m.credits;
+  const n = parseFloat(String(raw == null ? '' : raw).replace(/[^\d.]/g, ''));
+  return Number.isFinite(n) ? n : Infinity;
+}
+
+function formatProbeRate(m) {
+  let cred = (m.credits || '').trim().replace(/\s*credits$/i, '');
+  if (cred && !cred.startsWith('x') && !isNaN(Number(cred))) {
+    cred = 'x' + cred;
+  }
+  let promoCred = (m.promo_credits || '').trim().replace(/\s*credits$/i, '');
+  if (promoCred && !promoCred.startsWith('x') && promoCred !== '0' && promoCred !== '0x' && !isNaN(Number(promoCred))) {
+    promoCred = 'x' + promoCred;
+  }
+
+  if (m.promo_factor != null && promoCred) {
+    const base = cred ? '<s style="color:var(--ink-3);font-size:11px;margin-left:4px">' + esc(cred) + '</s>' : '';
+    const label = m.promo_label ? '<span class="tag ok" style="font-size:10.5px;padding:1px 5px">' + esc(m.promo_label) + '</span> ' : '';
+    return '<span class="pi-rate">' + label + '<b>' + esc(promoCred) + '</b>' + base + '</span>';
+  }
+  if (m.promo_label) {
+    const val = cred ? '<b>' + esc(cred) + '</b>' : '<span style="color:var(--ink-3)">—</span>';
+    return '<span class="pi-rate"><span class="tag warn" style="font-size:10.5px;padding:1px 5px">' + esc(m.promo_label) + '</span> ' + val + '</span>';
+  }
+  if (cred) {
+    return '<span class="pi-rate"><b>' + esc(cred) + '</b></span>';
+  }
+  return '<span class="pi-rate" style="color:var(--ink-3)">—</span>';
+}
+
+function selectProbeModel(bareId) {
+  probeSelectedModel = bareId;
+  const container = $('probeModelList');
+  if (container) {
+    container.querySelectorAll('.probe-item').forEach(el => {
+      el.classList.toggle('on', el.dataset.id === bareId);
+    });
+  }
+  if ($('probeSelectedInfo')) {
+    $('probeSelectedInfo').innerHTML = '已选模型：<b style="color:var(--ink)">' + esc(bareId) + '</b>';
+  }
+}
+
+function renderProbeModelList(filterText) {
+  const container = $('probeModelList');
+  if (!container) return;
+  const isGlobal = probeTargetRealm === 'global';
+
+  // 国际版 / 国内版模型严格隔离
+  let list = (window.mdAll || []).filter(m => {
+    const id = String(m.id || '');
+    if (isGlobal) {
+      return id.startsWith('global:');
+    }
+    return id.startsWith('cn:') || !id.startsWith('global:');
+  });
+
+  // 按倍率排序：优先限免/折扣，再按数值由低到高（便于测活时选低消耗模型）
+  list.sort((a, b) => {
+    const valA = probeRateValue(a);
+    const valB = probeRateValue(b);
+    if (valA !== valB) return valA - valB;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+
+  if (filterText) {
+    const q = filterText.toLowerCase();
+    list = list.filter(m => {
+      const bare = getBareModelId(m.id).toLowerCase();
+      const nm = (m.name || '').toLowerCase();
+      const desc = (m.description || '').toLowerCase();
+      return bare.includes(q) || nm.includes(q) || desc.includes(q);
+    });
+  }
+
+  if (!list.length) {
+    container.innerHTML = '<div style="padding:28px 14px;text-align:center;color:var(--ink-3);font-size:12.5px">' +
+      (filterText ? '未找到包含 “' + esc(filterText) + '” 的模型' : '当前版本暂无可用模型') + '</div>';
+    if ($('probeSelectedInfo')) $('probeSelectedInfo').textContent = '';
+    return;
+  }
+
+  // 检查已选模型是否在此列表内，若不在则默认选 deepseek-v4.1-flash 或列表中第一个
+  const selectedBare = getBareModelId(probeSelectedModel);
+  const exists = list.some(m => getBareModelId(m.id) === selectedBare);
+  if (!exists) {
+    const ds = list.find(m => getBareModelId(m.id) === 'deepseek-v4.1-flash');
+    probeSelectedModel = ds ? getBareModelId(ds.id) : getBareModelId(list[0].id);
+  }
+
+  const curBare = getBareModelId(probeSelectedModel);
+
+  container.innerHTML = list.map(m => {
+    const bare = getBareModelId(m.id);
+    const isSel = (bare === curBare);
+    const rateHtml = formatProbeRate(m);
+    const descHtml = m.description ? '<div class="pi-desc" title="' + esc(m.description) + '">' + esc(m.description) + '</div>' : '';
+    const defTag = m.is_default ? ' <span class="tag ok" style="font-size:10px;padding:0 4px">默认</span>' : '';
+    return '<div class="probe-item' + (isSel ? ' on' : '') + '" data-id="' + esc(bare) + '">' +
+      '<div class="pi-left">' +
+        '<div class="pi-name">' + esc(m.name || bare) + defTag + '</div>' +
+        '<div class="pi-id">' + esc(bare) + '</div>' +
+        descHtml +
+      '</div>' +
+      '<div class="pi-right">' +
+        rateHtml +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  if ($('probeSelectedInfo')) {
+    $('probeSelectedInfo').innerHTML = '已选模型：<b style="color:var(--ink)">' + esc(curBare) + '</b>';
+  }
+
+  // 滚动至已选模型
+  const activeEl = container.querySelector('.probe-item.on');
+  if (activeEl) {
+    activeEl.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+async function executeProbe() {
+  const model = getBareModelId(probeSelectedModel);
+  if (!model) {
+    toast('请选择一个模型进行测活', 'warn');
+    return;
+  }
+  const uid = probeTargetUID;
+  const realm = probeTargetRealm;
+  if (!uid) return;
+
+  localStorage.setItem('wb_probe_model_' + realm, model);
+  closeProbeModal();
+
+  window.probeResults = window.probeResults || {};
+  window.probeResults[uid] = { loading: true, model };
+  renderAccounts(lastAccounts);
+
+  try {
+    const r = await api('accounts/' + encodeURIComponent(uid) + '/probe?model=' + encodeURIComponent(model), { method: 'POST' });
+    window.probeResults[uid] = r;
+    if (r.ok) {
+      toast('测活成功（' + (r.model || model) + '）：' + r.latency_ms + 'ms' + (r.snippet ? ' · ' + r.snippet : ''), 'ok');
+    } else if (r.reset_at) {
+      const rAt = parseAPITime(r.reset_at);
+      const rem = rAt > Date.now() ? '，剩余 ' + dur(Math.round((rAt - Date.now()) / 1000)) : '';
+      toast('上游 6004 限流（' + (r.model || model) + '）：官方预计将在 ' + fmtLocalDateTime(rAt) + ' 解封' + rem, 'warn');
+    } else {
+      toast('测活失败' + (r.status ? ' (' + r.status + ')' : '') + '：' + (r.error || r.snippet || '未知错误'), 'err');
+    }
+  } catch (err) {
+    window.probeResults[uid] = { ok: false, error: err.message, model };
+    toast('测活异常：' + err.message, 'err');
+  } finally {
+    renderAccounts(lastAccounts);
+  }
+}
+
+async function openProbeModal(uid, realm, nickname) {
+  initProbeModal();
+  probeTargetUID = uid;
+  probeTargetRealm = realm === 'global' ? 'global' : 'cn';
+  probeTargetNick = nickname || uid;
+
+  const veil = $('probeVeil');
+  if (!veil) return;
+  veil.classList.add('on');
+
+  const realmLabel = probeTargetRealm === 'global' ? '国际版' : '国内版';
+  const realmTagClass = probeTargetRealm === 'global' ? 'realm-tag' : 'tag mute';
+  if ($('probeTargetTitle')) {
+    $('probeTargetTitle').innerHTML = '· ' + esc(probeTargetNick) + ' <span class="' + realmTagClass + '">' + realmLabel + '</span>';
+  }
+  if ($('probeTargetHint')) {
+    $('probeTargetHint').textContent = '为该【' + realmLabel + '】账号选择测活模型。列表仅展示' + realmLabel + '支持的模型，右侧标明上游倍率。';
+  }
+  if ($('probeSearchInput')) {
+    $('probeSearchInput').value = '';
+  }
+
+  const saved = localStorage.getItem('wb_probe_model_' + probeTargetRealm);
+  probeSelectedModel = saved || 'deepseek-v4.1-flash';
+
+  if (!window.mdAll || !window.mdAll.length) {
+    if ($('probeModelList')) {
+      $('probeModelList').innerHTML = '<div style="padding:28px 14px;text-align:center;color:var(--ink-3);font-size:12.5px"><span class="dots">正在从上游拉取模型列表</span></div>';
+    }
+    try {
+      const d = await api('models');
+      if (d && d.models) {
+        window.mdAll = d.models;
+      }
+    } catch (e) {
+      if ($('probeModelList')) {
+        $('probeModelList').innerHTML = '<div style="padding:28px 14px;text-align:center;color:var(--bad);font-size:12.5px">获取模型失败: ' + esc(e.message) + '</div>';
+      }
+      return;
+    }
+  }
+
+  renderProbeModelList('');
+  setTimeout(() => {
+    if ($('probeSearchInput')) $('probeSearchInput').focus();
+  }, 60);
+}
+
+function closeProbeModal() {
+  const veil = $('probeVeil');
+  if (veil) veil.classList.remove('on');
+}
+
+function initProbeModal() {
+  if (probeModalInited) return;
+  probeModalInited = true;
+
+  if ($('btnCloseProbeModal')) $('btnCloseProbeModal').onclick = closeProbeModal;
+  if ($('btnExecuteProbe')) $('btnExecuteProbe').onclick = executeProbe;
+  if ($('probeVeil')) {
+    $('probeVeil').onclick = e => {
+      if (e.target === $('probeVeil')) closeProbeModal();
+    };
+  }
+  if ($('probeSearchInput')) {
+    $('probeSearchInput').oninput = () => {
+      renderProbeModelList($('probeSearchInput').value.trim());
+    };
+    $('probeSearchInput').onkeydown = e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        executeProbe();
+      } else if (e.key === 'Escape') {
+        closeProbeModal();
+      }
+    };
+  }
+  if ($('probeModelList')) {
+    $('probeModelList').onclick = e => {
+      const item = e.target.closest('.probe-item');
+      if (!item) return;
+      const id = item.dataset.id;
+      if (!id) return;
+      selectProbeModel(id);
+    };
+    $('probeModelList').ondblclick = e => {
+      const item = e.target.closest('.probe-item');
+      if (!item) return;
+      const id = item.dataset.id;
+      if (!id) return;
+      selectProbeModel(id);
+      executeProbe();
+    };
+  }
+}
+
+function getActiveProbeModel() {
+  return localStorage.getItem('wb_probe_model_cn') || localStorage.getItem(LS_PROBE_MODEL) || 'deepseek-v4.1-flash';
+}
+function updateProbeModelOptions() {}
+function initProbeModelSelect() {
+  initProbeModal();
+}
+
+let isAccDragging = false;
+let draggedRow = null;
+let accDragInited = false;
+
+function sortAccountsByOrder(list) {
+  if (!list || list.length <= 1) return list || [];
+  let order = null;
+  try {
+    const raw = localStorage.getItem('wb_account_order');
+    if (raw) order = JSON.parse(raw);
+  } catch (_) {}
+  if (!Array.isArray(order) || !order.length) return list;
+
+  const orderMap = new Map();
+  order.forEach((uid, idx) => orderMap.set(uid, idx));
+
+  return list.slice().sort((a, b) => {
+    const idxA = orderMap.has(a.uid) ? orderMap.get(a.uid) : 999999;
+    const idxB = orderMap.has(b.uid) ? orderMap.get(b.uid) : 999999;
+    if (idxA !== idxB) return idxA - idxB;
+    return String(a.uid).localeCompare(String(b.uid));
+  });
+}
+
+function initAccountDragDrop() {
+  const tb = $('accBody');
+  if (!tb || accDragInited) return;
+  accDragInited = true;
+
+  tb.addEventListener('mousedown', e => {
+    const handle = e.target.closest('.drag-handle');
+    if (handle) {
+      const tr = handle.closest('tr');
+      if (tr) tr.draggable = true;
+    }
+  });
+
+  tb.addEventListener('mouseup', e => {
+    const tr = e.target.closest('tr');
+    if (tr && !isAccDragging) tr.draggable = false;
+  });
+
+  tb.addEventListener('dragstart', e => {
+    const tr = e.target.closest('tr');
+    if (!tr || !tr.dataset.uid) return;
+    draggedRow = tr;
+    isAccDragging = true;
+    tr.classList.add('dragging');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      try {
+        e.dataTransfer.setData('text/plain', tr.dataset.uid);
+      } catch (_) {}
+    }
+  });
+
+  tb.addEventListener('dragover', e => {
+    e.preventDefault();
+    if (!draggedRow) return;
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    const target = e.target.closest('tr');
+    if (!target || target === draggedRow || target.parentElement !== tb) return;
+    const rect = target.getBoundingClientRect();
+    const mid = rect.top + rect.height / 2;
+    if (e.clientY < mid) {
+      tb.insertBefore(draggedRow, target);
+    } else {
+      tb.insertBefore(draggedRow, target.nextSibling);
+    }
+  });
+
+  tb.addEventListener('dragend', async () => {
+    if (draggedRow) {
+      draggedRow.classList.remove('dragging');
+      draggedRow.draggable = false;
+    }
+    isAccDragging = false;
+    draggedRow = null;
+
+    // Collect new order of UIDs from DOM
+    const rows = Array.from(tb.querySelectorAll('tr[data-uid]'));
+    const order = rows.map(r => r.dataset.uid).filter(Boolean);
+    if (!order.length) return;
+
+    localStorage.setItem('wb_account_order', JSON.stringify(order));
+    const map = new Map(lastAccounts.map(a => [a.uid, a]));
+    lastAccounts = order.map(uid => map.get(uid)).filter(Boolean);
+
+    try {
+      await api('accounts/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order }),
+      });
+      toast('已保存账号排列顺序', 'ok');
+    } catch (err) {
+      console.warn('reorder save failed:', err);
+    }
+  });
+}
+
 function renderAccounts(list) {
+  if (isAccDragging) {
+    return;
+  }
+  initAccountDragDrop();
+  list = sortAccountsByOrder(list || []);
+  lastAccounts = list;
   const tb = $('accBody');
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
@@ -388,6 +868,26 @@ function renderAccounts(list) {
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
+    let probeTag = '';
+    const pr = window.probeResults && window.probeResults[s.uid];
+    if (pr) {
+      const modelName = pr.model ? pr.model.replace('deepseek-', 'ds-') : '测活';
+      if (pr.loading) {
+        probeTag = ' <span class="tag mute" style="margin-left:4px">测活中…</span>';
+      } else if (pr.ok) {
+        probeTag = ' <span class="tag ok" style="margin-left:4px" title="测活成功 (' + esc(pr.model || '') + '): ' + pr.latency_ms + 'ms · ' + esc(pr.snippet || '') + '">' + esc(modelName) + ' ' + pr.latency_ms + 'ms</span>';
+      } else if (pr.reset_at) {
+        const rAt = parseAPITime(pr.reset_at);
+        const rem = rAt > Date.now() ? dur(Math.round((rAt - Date.now()) / 1000)) : '';
+        const timeLabel = rAt ? fmtRecoveryTime(rAt, Date.now()) : '';
+        const tagText = esc(modelName) + ' 限流 · ' + timeLabel + ' 解封' + (rem ? ' (剩 ' + rem + ')' : '');
+        const detail = pr.error || pr.snippet || '限流';
+        probeTag = ' <span class="tag warn" style="margin-left:4px" title="上游 6004 限流 (' + esc(pr.model || '') + '): ' + esc(detail) + '\n恢复时间: ' + fmtLocalDateTime(rAt) + '">' + tagText + '</span>';
+      } else {
+        const detail = pr.error || pr.snippet || '失败';
+        probeTag = ' <span class="tag bad" style="margin-left:4px" title="测活失败 (' + esc(pr.model || '') + ')' + (pr.status ? ' [' + pr.status + ']' : '') + ': ' + esc(detail) + '">' + esc(modelName) + ' 失败' + (pr.status ? ' ' + pr.status : '') + '</span>';
+      }
+    }
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
@@ -421,10 +921,27 @@ function renderAccounts(list) {
     const latency = formatLatency(tu.last_latency_ms);
     const rate = formatRate(tu.last_tokens_per_second);
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
-    return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
+
+    const nickHtml = s.nickname
+      ? '<span class="nm-txt" title="' + esc(s.nickname) + '">' + esc(s.nickname) + '</span>'
+      : '<span class="nm-txt" style="color:var(--ink-3)">未命名</span>';
+    const realmHtml = (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') +
+      (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '');
+    const primaryRL = accountPrimaryRateLimit(s, Date.now());
+    const rstBadge = rateLimitBadgeHtml(primaryRL, Date.now());
+    const rstHtml = rstBadge ? ' ' + rstBadge : '';
+
+    return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '" data-uid="' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
-      '<td>' + tag + note + rateLimits + '</td>' +
+      '<td class="drag-handle" title="按住上下拖动调整账号排序" aria-label="拖动排序">' +
+        '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor">' +
+          '<circle cx="5" cy="3.5" r="1.3"/><circle cx="11" cy="3.5" r="1.3"/>' +
+          '<circle cx="5" cy="8" r="1.3"/><circle cx="11" cy="8" r="1.3"/>' +
+          '<circle cx="5" cy="12.5" r="1.3"/><circle cx="11" cy="12.5" r="1.3"/>' +
+        '</svg>' +
+      '</td>' +
+      '<td class="who"><div class="nm">' + nickHtml + realmHtml + rstHtml + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td>' + tag + probeTag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
@@ -435,13 +952,14 @@ function renderAccounts(list) {
         '<span class="usage-item usage-rate"><b>' + rate + '</b></span>' +
       '</span></td>' +
       '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
-      '<td class="acts">' +
+      '<td class="c-acts"><div class="acts">' +
         // 企业版无个人成长体系（签到 400「企业账号不支持该操作」/ 成长任务 403）：
         // 不渲染「签到」「任务」按钮，只留「额度」——点它走 /balance，企业额度由
         // upstream 的 get-enterprise-user-usage 口径填充。
         (s.enterprise ? '' :
           '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>') +
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>' +
+        '<button class="xs ghost" data-a="probe" data-u="' + esc(s.uid) + '" data-realm="' + esc(s.realm || 'cn') + '" data-nick="' + esc(s.nickname || '') + '" title="选择模型测活该账号">测活</button>' +
         (s.enterprise ? '' :
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
@@ -449,7 +967,7 @@ function renderAccounts(list) {
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
-      '</td></tr>';
+      '</div></td></tr>';
   }).join('');
 }
 
@@ -512,6 +1030,7 @@ async function loadOverview(quiet) {
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
+    initProbeModelSelect();
     renderAccounts(d.accounts || []);
     renderModelLocks(d.model_locks);
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的到期快照，不额外发请求）。
@@ -536,6 +1055,7 @@ $('accBody').addEventListener('click', async ev => {
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
     } else if (a === 'revive') {
       await api('accounts/' + encodeURIComponent(u) + '/revive', { method: 'POST' });
+      if (window.probeResults) delete window.probeResults[u];
       toast('已解冻', 'ok');
     } else if (a === 'disable') {
       await api('accounts/' + encodeURIComponent(u) + '/disable', { method: 'POST' });
@@ -548,6 +1068,10 @@ $('accBody').addEventListener('click', async ev => {
       toast('已恢复选号', 'ok');
     } else if (a === 'tasks') {
       openTasks(u);
+    } else if (a === 'probe') {
+      openProbeModal(u, b.dataset.realm || 'cn', b.dataset.nick || u);
+      b.disabled = false;
+      return;
     } else if (a === 'remove') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
@@ -571,6 +1095,37 @@ $('btnTravelAll').onclick = async () => {
 $('btnActivityAll').onclick = async () => {
   try { await api('activity_all', { method: 'POST' }); toast('活跃上报已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
+};
+$('btnProbeAll').onclick = async ev => {
+  const btn = $('btnProbeAll');
+  let model = getActiveProbeModel();
+  if (ev.altKey || ev.shiftKey) {
+    const custom = prompt('请输入要测活的模型名称：', model);
+    if (custom === null) return;
+    if (custom.trim()) model = custom.trim();
+  }
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = '测活中…';
+  (lastAccounts || []).forEach(s => {
+    window.probeResults[s.uid] = { loading: true, model };
+  });
+  renderAccounts(lastAccounts);
+  try {
+    const r = await api('probe_all?model=' + encodeURIComponent(model), { method: 'POST' });
+    let succ = 0, fail = 0;
+    (r.results || []).forEach(res => {
+      window.probeResults[res.uid] = res;
+      if (res.ok) succ++; else fail++;
+    });
+    toast('全部测活完成（' + model + '）：' + succ + ' 成功，' + fail + ' 失败', succ > 0 && fail === 0 ? 'ok' : (succ === 0 ? 'err' : 'warn'));
+  } catch (e) {
+    toast('全部测活失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+    loadOverview(true);
+  }
 };
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
@@ -643,6 +1198,7 @@ async function loadModels() {
     const hit = mdAll.filter(m => mdProbeOf(m.id)).length;
     $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
     renderModels();
+    updateProbeModelOptions();
   } catch (e) {
     mdAll = [];
     tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(e.message) + '</div></td></tr>';
@@ -1353,7 +1909,7 @@ async function loadTasks() {
         '<td class="num">' + esc(prog) + '</td>' +
         '<td class="num">' + esc(reward) + '</td>' +
         '<td>' + badge + '</td>' +
-        '<td class="acts">' + acted + '</td></tr>';
+        '<td class="c-acts"><div class="acts">' + acted + '</div></td></tr>';
     }).join('');
     st.hidden = true;
     tb.hidden = false;

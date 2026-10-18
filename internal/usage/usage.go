@@ -225,6 +225,33 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	r.dirty = true
 }
 
+// TokensInWindow 返回指定账号在过去 window 时长内对指定模型的累计消耗 TotalTokens。
+// uid 或 model 为空，或者 window <= 0 时返回 0。
+func (r *Recorder) TokensInWindow(uid, model string, window time.Duration) int64 {
+	if r == nil || uid == "" || model == "" || window <= 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-window)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var total int64
+	for _, b := range r.buckets {
+		if b.UID != uid || b.Model != model {
+			continue
+		}
+		if ts, ok := bucketTime(b.Scope); ok {
+			end := ts.Add(time.Hour)
+			if strings.HasPrefix(b.Scope, "d:") {
+				end = ts.Add(24 * time.Hour)
+			}
+			if !end.Before(cutoff) {
+				total += b.TT
+			}
+		}
+	}
+	return total
+}
+
 // Rollup 把超出 hourlyKeep 的小时桶折叠为日桶（按本地日历日）。
 // 幂等：同一小时反复折叠不会重复计数（先累加再删源桶）。
 func (r *Recorder) Rollup(now time.Time) {

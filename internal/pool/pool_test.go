@@ -1056,6 +1056,33 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestAccountOrder(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1", Nickname: "nick1"})
+	p.Add(&auth.Auth{UID: "u2", Nickname: "nick2"})
+	p.Add(&auth.Auth{UID: "u3", Nickname: "nick3"})
+
+	// 默认按 UID 字典序
+	defList := p.List()
+	if len(defList) != 3 || defList[0].UID != "u1" || defList[1].UID != "u2" || defList[2].UID != "u3" {
+		t.Fatalf("default order mismatch: %+v", defList)
+	}
+
+	// 自定义逆序 [u3, u1, u2]
+	p.SetAccountOrder([]string{"u3", "u1", "u2"})
+	reordered := p.List()
+	if len(reordered) != 3 || reordered[0].UID != "u3" || reordered[1].UID != "u1" || reordered[2].UID != "u2" {
+		t.Fatalf("custom order mismatch: %+v", reordered)
+	}
+
+	// 仅设置部分 [u2]，其余未列出者按 UID 字典序补齐 [u2, u1, u3]
+	p.SetAccountOrder([]string{"u2"})
+	partial := p.List()
+	if len(partial) != 3 || partial[0].UID != "u2" || partial[1].UID != "u1" || partial[2].UID != "u3" {
+		t.Fatalf("partial order mismatch: %+v", partial)
+	}
+}
+
 func TestRemoveMissingFromDir(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -1980,4 +2007,157 @@ func TestResumeIdempotent(t *testing.T) {
 	if st, _ := p.Status("u1"); st.Paused {
 		t.Errorf("Paused 应仍为 false: %+v", st)
 	}
+}
+
+func TestTokenAwareWeighting(t *testing.T) {
+	p := New("")
+	now := time.Now()
+	a := &auth.Auth{UID: "u1", Domain: "www.workbuddy.ai"} // 消耗高 (80M)
+	b := &auth.Auth{UID: "u2", Domain: "www.workbuddy.ai"} // 消耗低 (10M)
+	p.Add(a)
+	p.Add(b)
+	p.SetCreditsDetailed("u1", 350, 350, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("u2", 350, 350, 0, time.Time{}, 0)
+
+	tokens := map[string]int64{
+		"u1": 80_000_000,
+		"u2": 10_000_000,
+	}
+	p.SetTokenUsageOf(func(uid, model string, window time.Duration) int64 {
+		return tokens[uid]
+	})
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	w1 := p.routingWeightOfModel(p.byUID["u1"], 350, now, "deepseek-v4.1-flash", "global")
+	w2 := p.routingWeightOfModel(p.byUID["u2"], 350, now, "deepseek-v4.1-flash", "global")
+
+	// u2 消耗远低于 u1，权重应显著高于 u1
+	if w2 <= w1 {
+		t.Fatalf("w2 (%v) should be higher than w1 (%v) due to token usage penalty", w2, w1)
+	}
+}
+
+func TestTokenSoftCeilingProtection(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	a := &auth.Auth{UID: "u1", Domain: "www.workbuddy.ai"} // 消耗 96M (已达 95% 软限额)
+	b := &auth.Auth{UID: "u2", Domain: "www.workbuddy.ai"} // 消耗 20M
+	p.Add(a)
+	p.Add(b)
+	p.SetCreditsDetailed("u1", 350, 350, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("u2", 350, 350, 0, time.Time{}, 0)
+
+	tokens := map[string]int64{
+		"u1": 96_000_000,
+		"u2": 20_000_000,
+	}
+	p.SetTokenUsageOf(func(uid, model string, window time.Duration) int64 {
+		return tokens[uid]
+	})
+
+	// 选号应当跳过 u1，只选 u2
+	picked := p.PickExcludingForRealm(nil, "deepseek-v4.1-flash", "global")
+	if picked == nil || picked.UID != "u2" {
+		t.Fatalf("picked=%v, want u2 due to soft ceiling on u1", picked)
+	}
+
+	// 当所有账号都达 96M 时，不应直接返回 nil（不提前 503），应兜底返回其中一个
+	tokens["u2"] = 96_000_000
+	picked = p.PickExcludingForRealm(nil, "deepseek-v4.1-flash", "global")
+	if picked == nil {
+		t.Fatal("all accounts at ceiling should still return an account as best-effort fallback")
+	}
+}
+
+func TestFastGraduateUnprobedTier1(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	a := &auth.Auth{UID: "u1", Domain: "www.workbuddy.ai"} // Tier 0 已实测免费
+	b := &auth.Auth{UID: "u2", Domain: "www.workbuddy.ai"} // Tier 1 全新号 (0 samples)
+	p.Add(a)
+	p.Add(b)
+	p.SetCreditsDetailed("u1", 350, 350, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("u2", 350, 350, 0, time.Time{}, 0)
+	p.NoteModelCost("u1", "deepseek-v4.1-flash", 0, 1000)
+
+	// 设置常规探索窗口为 30 分钟
+	p.SetCostExploreInterval(30 * time.Minute)
+	// 模拟刚才 1 分钟前（远未达到 30 分钟）进行过一次探索
+	p.mu.Lock()
+	p.exploreLast["global\x1fdeepseek-v4.1-flash"] = time.Now().Add(-1 * time.Minute)
+	p.mu.Unlock()
+
+	// 因为 u2 是全新的 0-sample 号，10s 防抖已过（上次是 1 分钟前），
+	// 选号应触发探索切入 Tier 1，选中 u2 快速破冰！
+	picked := p.PickExcludingForRealm(nil, "deepseek-v4.1-flash", "global")
+	if picked == nil || picked.UID != "u2" {
+		t.Fatalf("picked=%v, want u2 for fast graduate of unprobed account", picked)
+	}
+}
+
+// TestPickLeastInFlightFirst 验证空闲账号 (inFlight == 0) 严格优先于繁忙账号 (inFlight > 0)，
+// 即使繁忙账号已是 Tier 0 免费且未观测账号为 Tier 1。
+func TestPickLeastInFlightFirst(t *testing.T) {
+	p := New("")
+	a := &auth.Auth{UID: "busy", Domain: "www.workbuddy.ai"}
+	b := &auth.Auth{UID: "idle", Domain: "www.workbuddy.ai"}
+	p.Add(a)
+	p.Add(b)
+	p.SetCreditsDetailed("busy", 350, 350, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("idle", 350, 350, 0, time.Time{}, 0)
+	p.NoteModelCost("busy", "deepseek-v4.1-flash", 0, 1000) // busy 账号已实测免费 (Tier 0)
+	// 关闭探索（避免探索干扰测试）
+	p.SetCostExploreInterval(0)
+
+	// busy 账号正在执行请求 (inFlight = 1)
+	if !p.Acquire("busy") {
+		t.Fatal("Acquire busy failed")
+	}
+	defer p.Release("busy")
+
+	// 选号：应当严格优先将新请求派发给空闲的 idle 账号 (Tier 1)，而不是叠加在 busy (Tier 0) 上
+	picked := p.PickExcludingForRealm(nil, "deepseek-v4.1-flash", "global")
+	if picked == nil || picked.UID != "idle" {
+		t.Fatalf("picked=%v, want idle account", picked)
+	}
+}
+
+// TestPickStickyConcurrentOffload 验证会话粘性在面对并发请求时的分流与会话保持逻辑。
+func TestPickStickyConcurrentOffload(t *testing.T) {
+	p := New("")
+	a := &auth.Auth{UID: "sticky1", Domain: "www.workbuddy.ai"}
+	b := &auth.Auth{UID: "idle2", Domain: "www.workbuddy.ai"}
+	p.Add(a)
+	p.Add(b)
+	p.SetMaxInFlightGlobal(2)
+
+	// 1. sticky1 空闲时，PickSticky 正常返回 sticky1
+	got, unbind := p.PickStickyForModel("sticky1", "deepseek-v4.1-flash", "global")
+	if got == nil || got.UID != "sticky1" || unbind {
+		t.Fatalf("got=%v unbind=%v, want sticky1 false", got, unbind)
+	}
+
+	// 2. sticky1 正在处理请求 (inFlight = 1)，池中存在空闲的 idle2 (inFlight = 0)
+	if !p.Acquire("sticky1") {
+		t.Fatal("acquire failed")
+	}
+
+	// 并发请求到达：PickSticky 应当主动让渡 (nil, false)，不解绑会话，以便并发分流到 idle2
+	got, unbind = p.PickStickyForModel("sticky1", "deepseek-v4.1-flash", "global")
+	if got != nil || unbind != false {
+		t.Fatalf("concurrent offload: got=%v unbind=%v, want nil false (offload without unbinding)", got, unbind)
+	}
+
+	// 3. 当 idle2 也忙碌时 (池中无空闲账号)，若 sticky1 未达到上限 (limit=2, inFlight=1)，则仍允许承接
+	if !p.Acquire("idle2") {
+		t.Fatal("acquire idle2 failed")
+	}
+	got, unbind = p.PickStickyForModel("sticky1", "deepseek-v4.1-flash", "global")
+	if got == nil || got.UID != "sticky1" || unbind {
+		t.Fatalf("all busy: got=%v unbind=%v, want sticky1 false", got, unbind)
+	}
+
+	p.Release("sticky1")
+	p.Release("idle2")
 }

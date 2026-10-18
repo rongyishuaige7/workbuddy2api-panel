@@ -2,10 +2,15 @@ package panel
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1006,3 +1011,295 @@ process.stdout.write(JSON.stringify({
 			strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestProbeModalHTMLAndLogic 验证测活弹窗的 HTML 结构及前端隔离逻辑：
+// 1. index.html 包含 probeVeil 及全部交互元素；
+// 2. 国际版账号与国内版账号在弹窗中模型列表严格隔离（国际版仅显示 global:，国内版仅显示 cn:）；
+// 3. 模型条目右侧正确渲染计费倍率与限免标签。
+func TestProbeModalHTMLAndLogic(t *testing.T) {
+	// 1. 检验 index.html 元素
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+
+	requiredIDs := []string{
+		"probeVeil",
+		"probeTargetTitle",
+		"probeTargetHint",
+		"probeSearchInput",
+		"probeModelList",
+		"probeSelectedInfo",
+		"btnCloseProbeModal",
+		"btnExecuteProbe",
+	}
+	for _, id := range requiredIDs {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Errorf("index.html missing required probe modal element id=%q", id)
+		}
+	}
+
+	// 2. 检验 app.js 中隔离与倍率展示逻辑
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS logic verification")
+	}
+
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; },
+  apply() { return inert; },
+  construct() { return inert; },
+  has() { return true; },
+});
+const sinks = {};
+const $ = id => sinks[id] || (sinks[id] = { innerHTML: '', textContent: '', value: '', style: {}, classList: { add() {}, remove() {}, toggle() {} }, addEventListener() {}, scrollIntoView() {}, querySelector: () => null, querySelectorAll: () => [] });
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const sandbox = new Proxy({
+  $, esc,
+  location: { hash: '#accounts' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { querySelectorAll: () => [], querySelector: () => inert, getElementById: $, documentElement: { dataset: {} }, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval: () => {}, clearInterval: () => {}, setTimeout: () => {}, clearTimeout: () => {},
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect, Infinity, isFinite,
+}, { get(t, k) { return t[k] !== undefined ? t[k] : inert; }, has() { return true; } });
+sandbox.window = sandbox;
+sandbox.globalThis = sandbox;
+
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, { filename: 'app.js' });
+
+// 准备测试模型数据
+sandbox.window.mdAll = [
+  { id: 'cn:deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', credits: 'x0.11' },
+  { id: 'cn:step-5-preview', name: 'Step-5-Preview', credits: 'x0.43', promo_credits: '0x', promo_label: '独家限免', promo_factor: 0 },
+  { id: 'global:deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash (Global)', credits: 'x0.15' },
+  { id: 'global:gemini-3.8-flash', name: 'Gemini-3.8-Flash', credits: 'x0.95' },
+];
+
+// 测试 1: 国内版测活过滤（只能有 cn，不能有 global）
+sandbox.openProbeModal('uid-cn-1', 'cn', '测试国内账号');
+const cnHTML = sinks['probeModelList'] ? sinks['probeModelList'].innerHTML : '';
+const hasCN = cnHTML.includes('Step-5-Preview') && cnHTML.includes('独家限免') && cnHTML.includes('0x');
+const hasLeakGlobalInCN = cnHTML.includes('gemini-3.8-flash') || cnHTML.includes('(Global)');
+
+// 测试 2: 国际版测活过滤（只能有 global，不能有 cn）
+sandbox.openProbeModal('uid-gl-1', 'global', '测试国际账号');
+const glHTML = sinks['probeModelList'] ? sinks['probeModelList'].innerHTML : '';
+const hasGlobal = glHTML.includes('gemini-3.8-flash') && glHTML.includes('x0.95');
+const hasLeakCNInGlobal = glHTML.includes('Step-5-Preview') || glHTML.includes('独家限免');
+
+process.stdout.write(JSON.stringify({
+  cnPass: hasCN && !hasLeakGlobalInCN,
+  glPass: hasGlobal && !hasLeakCNInGlobal,
+  cnHTMLPreview: cnHTML.slice(0, 150),
+  glHTMLPreview: glHTML.slice(0, 150),
+}));
+`
+	f, err := os.CreateTemp(t.TempDir(), "probemodal-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe modal node test failed: %v\n%s", err, out)
+	}
+
+	var res struct {
+		CNPass bool `json:"cnPass"`
+		GLPass bool `json:"glPass"`
+	}
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatalf("invalid json output from test: %v, out=%s", err, out)
+	}
+	if !res.CNPass {
+		t.Errorf("CN realm probe list failed: expected CN models and promo rate, got output: %s", out)
+	}
+	if !res.GLPass {
+		t.Errorf("Global realm probe list failed: expected Global models only, got output: %s", out)
+	}
+}
+
+// TestAccountReorderAPIAndUI 验证账号排序 API 与前端拖动支持：
+// 1. index.html 包含拖动手柄表头 th.c-drag；
+// 2. POST /panel/api/accounts/reorder 成功更新池内账号顺序；
+// 3. app.js 中 sortAccountsByOrder 能够按照保存的顺序重排。
+func TestAccountReorderAPIAndUI(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `class="c-drag"`) {
+		t.Errorf("index.html missing class=\"c-drag\" in table header")
+	}
+
+	// 测试后端 reorder 接口
+	p.cfg.Pool = pool.New("")
+	p.cfg.Pool.Add(&auth.Auth{UID: "u1"})
+	p.cfg.Pool.Add(&auth.Auth{UID: "u2"})
+	p.cfg.Pool.Add(&auth.Auth{UID: "u3"})
+
+	reorderReq := httptest.NewRequest("POST", "/panel/api/accounts/reorder", strings.NewReader(`{"order":["u3","u1","u2"]}`))
+	reorderReq.Header.Set("Content-Type", "application/json")
+	reorderReq.Header.Set("Authorization", "Bearer test-key")
+	recReorder := httptest.NewRecorder()
+	p.ServeHTTP(recReorder, reorderReq)
+
+	if recReorder.Code != http.StatusOK {
+		t.Fatalf("reorder status = %d, body = %s", recReorder.Code, recReorder.Body.String())
+	}
+	list := p.cfg.Pool.List()
+	if len(list) != 3 || list[0].UID != "u3" || list[1].UID != "u1" || list[2].UID != "u2" {
+		t.Fatalf("pool.List after reorder mismatch: %+v", list)
+	}
+
+	// 测试前端 sortAccountsByOrder 逻辑
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS logic verification")
+	}
+
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+
+const store = { wb_account_order: JSON.stringify(['u3', 'u2', 'u1']) };
+const sandbox = {
+  localStorage: { getItem: k => store[k], setItem: (k, v) => { store[k] = v; } },
+  Map, Array, String, JSON
+};
+vm.createContext(sandbox);
+
+// 提取 sortAccountsByOrder
+const m = src.match(/function sortAccountsByOrder\([^{]+{[\s\S]+?\n}/);
+if (!m) throw new Error('sortAccountsByOrder not found');
+vm.runInContext(m[0], sandbox);
+
+const input = [{ uid: 'u1' }, { uid: 'u2' }, { uid: 'u3' }];
+const sorted = sandbox.sortAccountsByOrder(input);
+process.stdout.write(JSON.stringify(sorted.map(a => a.uid)));
+`
+	f, err := os.CreateTemp(t.TempDir(), "reorder-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("sortAccountsByOrder test failed: %v\n%s", err, out)
+	}
+	const want = `["u3","u2","u1"]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("sortAccountsByOrder = %s, want %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSRateLimitBadge 验证限流官方恢复时间展示组件（rst-tag）与提取逻辑
+func TestAppJSRateLimitBadge(t *testing.T) {
+	// 1. 验证 index.html 包含 .rst-tag 样式
+	idx, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(idx), ".rst-tag") {
+		t.Errorf("index.html missing .rst-tag CSS rule")
+	}
+
+	// 2. 验证 app.js 内函数行为
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping JS logic verification")
+	}
+
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; },
+  apply() { return inert; },
+  construct() { return inert; },
+  has() { return true; },
+});
+const sinks = {};
+const $ = id => sinks[id] || (sinks[id] = { innerHTML: '', textContent: '', value: '', style: {}, classList: { add() {}, remove() {}, toggle() {} }, addEventListener() {}, scrollIntoView() {}, querySelector: () => null, querySelectorAll: () => [] });
+
+const sandbox = new Proxy({
+  $,
+  location: { hash: '#accounts' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { querySelectorAll: () => [], querySelector: () => inert, getElementById: $, documentElement: { dataset: {} }, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval: () => {}, clearInterval: () => {}, setTimeout: () => {}, clearTimeout: () => {},
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect, Infinity, isFinite,
+}, { get(t, k) { return t[k] !== undefined ? t[k] : inert; }, has() { return true; } });
+sandbox.window = sandbox;
+sandbox.globalThis = sandbox;
+
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, { filename: 'app.js' });
+
+const now = Date.now();
+const s = {
+  uid: 'u_test',
+  rate_limited_models: [
+    { model: 'kimi-k1.5', kind: 'rate_limit', reset_at: new Date(now + 2 * 3600 * 1000).toISOString() },
+    { model: 'deepseek-v4.1-flash', kind: 'rate_limit', reset_at: new Date(now + 7 * 3600 * 1000 + 33 * 60 * 1000).toISOString() }
+  ]
+};
+
+// 优先级：必须优先选择主力模型 deepseek-v4.1-flash
+const rl = sandbox.accountPrimaryRateLimit(s, now);
+if (!rl || rl.model !== 'deepseek-v4.1-flash') {
+  throw new Error('expected deepseek-v4.1-flash, got: ' + JSON.stringify(rl));
+}
+
+const badge = sandbox.rateLimitBadgeHtml(rl, now);
+if (!badge.includes('rst-tag') || !badge.includes('解封') || !badge.includes('7时33分')) {
+  throw new Error('unexpected badge html: ' + badge);
+}
+
+process.stdout.write('OK');
+`
+	f, err := os.CreateTemp(t.TempDir(), "rlbadge-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rateLimitBadge test failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "OK" {
+		t.Fatalf("rateLimitBadge = %s, want OK", strings.TrimSpace(string(out)))
+	}
+}
+
+
+

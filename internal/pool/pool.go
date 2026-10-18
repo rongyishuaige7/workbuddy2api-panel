@@ -14,6 +14,7 @@ import (
 type Pool struct {
 	mu      sync.RWMutex
 	byUID   map[string]*entry
+	order   []string // 自定义账号排列顺序
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
 	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。
@@ -54,6 +55,12 @@ type Pool struct {
 	// 循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
 	// 仅在持 p.mu 时由 floorBlockedForModel 调用；回调不得反向调用 Pool 方法。
 	modelRateOf func(realm, model string) string
+	// tokenUsageOf 查账号在指定时间窗口内（如 24 小时）对指定模型的累计已用 Token 数。
+	// 由 main 用 usage.Recorder.TokensInWindow 注入。
+	tokenUsageOf func(uid, model string, window time.Duration) int64
+	// tokenCeilingOf 查 (realm, 模型) 的单日 Token 安全上限（0 = 不设上限/未知）。
+	// nil 时使用 defaultTokenCeiling。
+	tokenCeilingOf func(realm, model string) int64
 	// 加权路由的闲置补偿调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
@@ -238,6 +245,103 @@ func (p *Pool) SetModelRateOf(fn func(realm, model string) string) {
 	p.modelRateOf = fn
 }
 
+// SetTokenUsageOf 注入按窗口查询账号累计 Token 消耗的回调（main 用 usage.Recorder.TokensInWindow 装配）。
+// 用于 Token 维度的平摊加权与主动软避障（Soft Ceiling）。
+func (p *Pool) SetTokenUsageOf(fn func(uid, model string, window time.Duration) int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tokenUsageOf = fn
+}
+
+// SetTokenCeilingOf 注入单日 Token 配额上限查询回调。nil 时使用系统内置默认（DeepSeek: global 1亿, cn 2亿）。
+func (p *Pool) SetTokenCeilingOf(fn func(realm, model string) int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tokenCeilingOf = fn
+}
+
+// effectiveTokenCeiling 返回 (realm, 模型) 的单日 Token 限额上限。
+func (p *Pool) effectiveTokenCeiling(realm, model string) int64 {
+	if p.tokenCeilingOf != nil {
+		if c := p.tokenCeilingOf(realm, model); c > 0 {
+			return c
+		}
+	}
+	return defaultTokenCeiling(realm, model)
+}
+
+// defaultTokenCeiling 默认单日 Token 上限（DeepSeek 系列：global 1 亿，cn 2 亿）。
+func defaultTokenCeiling(realm, model string) int64 {
+	m := strings.ToLower(model)
+	if strings.HasPrefix(m, "deepseek") {
+		if realm == "global" {
+			return 100_000_000 // 国际版 1 亿 tokens
+		}
+		return 200_000_000 // 国内版 2 亿 tokens
+	}
+	return 0
+}
+
+// tokenCeilingReached 检查账号在过去 24 小时内对该模型的消耗是否达到软上限（95%），避免触发 6004。
+func (p *Pool) tokenCeilingReached(e *entry, model, realm string) bool {
+	if p.tokenUsageOf == nil || model == "" || e == nil {
+		return false
+	}
+	ceiling := p.effectiveTokenCeiling(realm, model)
+	if ceiling <= 0 {
+		return false
+	}
+	used := p.tokenUsageOf(e.a.UID, model, 24*time.Hour)
+	return used >= int64(float64(ceiling)*0.95)
+}
+
+// hasOtherUnderCeilingAccount 检查池内是否存在其他健康且未达到 95% 软上限的候选账号。
+func (p *Pool) hasOtherUnderCeilingAccount(excludeUID, model, realm string) bool {
+	now := time.Now()
+	for uid, e := range p.byUID {
+		if uid == excludeUID {
+			continue
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthyForModel(now, model) || p.inFlightFull(e) {
+			continue
+		}
+		if !p.tokenCeilingReached(e, model, realm) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOtherIdleAccount 检查池内是否存在除 excludeUID 以外、其他健康、非触底、未达限额且当前完全空闲 (inFlight == 0) 的候选账号。
+// 必须在持 p.mu 锁下调用。
+func (p *Pool) hasOtherIdleAccount(excludeUID, model, realm string) bool {
+	now := time.Now()
+	for uid, e := range p.byUID {
+		if uid == excludeUID {
+			continue
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthyForModel(now, model) {
+			continue
+		}
+		if p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue
+		}
+		if p.tokenCeilingReached(e, model, realm) {
+			continue
+		}
+		if e.inFlight.Load() == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。
 func (p *Pool) SetMaxInFlight(n int) {
 	p.mu.Lock()
@@ -387,4 +491,24 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 	p.byUID[a.UID] = &entry{a: a}
 }
 
-// Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
+// SetAccountOrder 设置账号自定义排序并触发持久化。
+func (p *Pool) SetAccountOrder(order []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.order = make([]string, len(order))
+	copy(p.order, order)
+	p.dirty.Store(true)
+	p.saveLocked()
+}
+
+// AccountOrder 获取当前设置的账号自定义顺序副本。
+func (p *Pool) AccountOrder() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.order) == 0 {
+		return nil
+	}
+	out := make([]string, len(p.order))
+	copy(out, p.order)
+	return out
+}

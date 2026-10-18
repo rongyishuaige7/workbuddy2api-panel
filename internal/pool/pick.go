@@ -74,6 +74,29 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 		cands = append(cands, e)
 	}
+
+	// 主动软避障（Soft Ceiling Protection）：
+	// 如果存在未触及 95% 软限额的候选账号，则将濒危账号排除，避免其被上游 6004 硬锁 24 小时；
+	// 若池内所有候选账号均已触顶，则保留全员兜底服务（避免提前 503）。
+	if len(cands) > 1 && reqModel != "" {
+		hasUnderCeiling := false
+		for _, e := range cands {
+			if !p.tokenCeilingReached(e, reqModel, realm) {
+				hasUnderCeiling = true
+				break
+			}
+		}
+		if hasUnderCeiling {
+			filtered := make([]*entry, 0, len(cands))
+			for _, e := range cands {
+				if !p.tokenCeilingReached(e, reqModel, realm) {
+					filtered = append(filtered, e)
+				}
+			}
+			cands = filtered
+		}
+	}
+
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
@@ -126,14 +149,22 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	//（天然防重复探索）。key = realm + "\x1f" + reqModel：同模型名可跨域，
 	// 探索节奏按 (域, 模型) 独立；realm==""（Pick 老语义）单独成键。
 	if p.costExploreInterval > 0 && bestTier == 0 && reqModel != "" {
+		hasUnprobedTier1 := false
 		for _, e := range cands {
 			if ti, _ := costTier(e); ti == 1 {
 				hasTier1 = true
-				break
+				if mc, ok := e.modelCostOf(reqModel, now); !ok || mc.Samples == 0 {
+					hasUnprobedTier1 = true
+				}
 			}
 		}
 		key := realm + "\x1f" + reqModel
-		if hasTier1 && now.Sub(p.exploreLast[key]) >= p.costExploreInterval {
+		interval := p.costExploreInterval
+		if hasUnprobedTier1 {
+			// 全新未观测号快速破冰：10秒防抖窗口，不必死等 30 分钟
+			interval = 10 * time.Second
+		}
+		if hasTier1 && now.Sub(p.exploreLast[key]) >= interval {
 			p.exploreLast[key] = now
 			p.costExploreEvents++
 			bestTier = 1
@@ -152,8 +183,11 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	ws := make([]weighted, 0, len(cands))
 	for _, e := range cands {
 		ti, ci := costTier(e)
-		if ti == bestTier {
-			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
+		// 当存在免费账号 (bestTier == 0) 时，未知账号 (ti == 1) 也允许一同进入候选，
+		// 配合 Least-In-Flight 排序与并发调度，杜绝单号垄断、促进未知号快速毕业。
+		tierEligible := (ti == bestTier) || (bestTier == 0 && ti == 1)
+		if tierEligible {
+			ws = append(ws, weighted{e: e, w: p.routingWeightOfModel(e, maxCredits, now, reqModel, realm), tier: ti, cost1k: ci})
 		}
 	}
 	// 等权重洗牌：仅当存在权重相等且候选数超过 top5 时，才对 ws 做 Fisher-Yates
@@ -176,11 +210,22 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 	}
 	sort.SliceStable(ws, func(i, j int) bool {
-		// costTier 硬过滤后 ws 全员同层，但仍按 cost1k 升序排（tier 2 层内单价低者
-		// 在前；tier 0/1 层 cost1k 恒 0，本比较退化为权重比较）——读缓存字段不现算。
-		if ws[i].cost1k != ws[j].cost1k {
-			return ws[i].cost1k < ws[j].cost1k // 收费层：单价低的在前
+		// 0. Least in-flight connections first: 空闲账号严格优先 (inFlight == 0 优先于 inFlight > 0)
+		// 优先把请求派发给没有任何在途连接的空闲账号，平摊并发压力，彻底规避单账号并发过高触发上游 WAF 拦截
+		iIF := ws[i].e.inFlight.Load()
+		jIF := ws[j].e.inFlight.Load()
+		if iIF != jIF {
+			return iIF < jIF
 		}
+		// 1. costTier 优先级：免费层 (tier 0) 优于 未知层 (tier 1)，未知层优于收费层 (tier 2)
+		if ws[i].tier != ws[j].tier {
+			return ws[i].tier < ws[j].tier
+		}
+		// 2. 收费层：单价低的在前
+		if ws[i].cost1k != ws[j].cost1k {
+			return ws[i].cost1k < ws[j].cost1k
+		}
+		// 3. 权重高者在前
 		if ws[i].w != ws[j].w {
 			return ws[i].w > ws[j].w
 		}
@@ -219,7 +264,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			}
 		}
 	} else {
-		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
+		e = p.pickWeighted(eligible, reqModel, realm) // eligible 保序 = top5 降序子集
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -362,7 +407,7 @@ var minPickGap = 100 * time.Millisecond
 // credits 全 0 时仍按 idleWeight 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
 // 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
-func (p *Pool) pickWeighted(cands []*entry) *entry {
+func (p *Pool) pickWeighted(cands []*entry, model, realm string) *entry {
 	now := time.Now()
 	var maxCredits int64
 	for _, e := range cands {
@@ -374,7 +419,7 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 	weights := make([]int64, len(cands))
 	var total int64
 	for i, e := range cands {
-		w := p.routingWeightOf(e, maxCredits, now)
+		w := p.routingWeightOfModel(e, maxCredits, now, model, realm)
 		weights[i] = int64(w * scale)
 		total += weights[i]
 	}
@@ -396,8 +441,13 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 	return cands[len(cands)-1]
 }
 
-// weightOf 计算单个账号的普通加权分值。
+// weightOf 计算单个账号的普通加权分值（老口径兼容）。
 func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
+	return p.weightOfModel(e, maxCredits, now, "", "")
+}
+
+// weightOfModel 计算带模型 Token 消耗平摊因子的普通加权分值。
+func (p *Pool) weightOfModel(e *entry, maxCredits int64, now time.Time, model, realm string) float64 {
 	w := 1.0
 	// 1. credits 比例 ×10（会计入 mid-credit 锚点，避免全员 0 时 credits 项为 0）。
 	if maxCredits > 0 {
@@ -417,9 +467,27 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 		}
 		w += idleW
 	}
-	// 3.（原「成功率 ×3」因子已删，对齐上游 success-ema-review：errTotal 是终身
-	// 累计、只增不减，成功率 = successCount/(successCount+errTotal) 会让早期出过错
-	// 的号被永久压权且永不恢复；瞬时健康信号已由冷却/熔断/连败降权承接。）
+	// 3. Token 消耗平摊惩罚因子：当存在 24h Token 统计时，已消耗越多，权重越低，实现多号动态平摊
+	if p.tokenUsageOf != nil && model != "" {
+		used := p.tokenUsageOf(e.a.UID, model, 24*time.Hour)
+		ceiling := p.effectiveTokenCeiling(realm, model)
+		if ceiling > 0 && used > 0 {
+			ratio := float64(used) / float64(ceiling)
+			if ratio > 1.0 {
+				ratio = 1.0
+			}
+			// 线性平滑压低：0% 使用 -> 1.0; 50% 使用 -> 0.55; 90% 使用 -> 0.19; 封底 0.05
+			factor := 1.0 - 0.9*ratio
+			if factor < 0.05 {
+				factor = 0.05
+			}
+			w *= factor
+		}
+	}
+	// 4. 在途请求惩罚：已有在途请求时动态降低权重，推动并发请求向空闲账号倾斜
+	if inflight := e.inFlight.Load(); inflight > 0 {
+		w /= float64(1 + inflight*4)
+	}
 	return w
 }
 
@@ -431,10 +499,14 @@ func expiringNow(e *entry, now time.Time) bool {
 		e.creditsEarliestExpiry.After(now)
 }
 
-// routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false
-// 或账号无有效快过期批次时，实例数恒为 1，结果与旧 weightOf 完全一致。
+// routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量（老口径兼容）。
 func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float64 {
-	w := p.weightOf(e, maxCredits, now)
+	return p.routingWeightOfModel(e, maxCredits, now, "", "")
+}
+
+// routingWeightOfModel 在模型感知普通账号权重上叠加快过期虚拟实例数量。
+func (p *Pool) routingWeightOfModel(e *entry, maxCredits int64, now time.Time, model, realm string) float64 {
+	w := p.weightOfModel(e, maxCredits, now, model, realm)
 	if p.preferExpiring && expiringNow(e, now) {
 		return w * expiringVirtualSlots
 	}

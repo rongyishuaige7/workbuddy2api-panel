@@ -245,6 +245,9 @@ func main() {
 	rec.Start()
 	defer rec.Stop()
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
+	p.SetTokenUsageOf(func(uid, model string, window time.Duration) int64 {
+		return rec.TokensInWindow(uid, model, window)
+	})
 
 	// 请求指标始终启用；JSONL 归档只写脱敏元数据，写盘失败不影响聊天请求。
 	requestLog := reqlog.New(reqlog.Config{

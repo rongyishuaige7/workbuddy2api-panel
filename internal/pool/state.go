@@ -370,39 +370,62 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 	return uids
 }
 
-// PickByUIDForModel 同 PickByUID，但用 healthyForModel 校验：绑定号在当前模型被
-// 6004 限流时返回 nil，让调用方（handler）解绑并回落普通轮换。
-// 这是粘性能"换得动"的关键：绑定只记 uid，若只按账号级 healthy 校验，
-// 被模型级限额的号（账号整体仍健康）会被持续选中直到轮换次数耗尽。
-func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
+// PickStickyForModel 供会话粘性路由命中校验与直取使用。
+// 返回 (auth, unbind)：
+//   - (auth, false): 成功选中粘性号
+//   - (nil, false): 粘性号暂时繁忙 (inFlight > 0) 且池内存在其他空闲账号，分流给空闲号，不解绑会话
+//   - (nil, true): 粘性号不可用 (不存在 / realm不符 / 冷却 / 模型不可用 / 积分保底 / 软上限 / 满载且池无空闲)，需解绑
+func (p *Pool) PickStickyForModel(uid, model, realm string) (*auth.Auth, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
-		return nil
+		return nil, true
+	}
+	if realm != "" && e.a.Realm() != realm {
+		return nil, true
 	}
 	now := time.Now()
 	if !e.healthyForModel(now, model) {
-		return nil
+		return nil, true
 	}
 	// 积分保底（粘性路径）：与 pick 的 floorBlocked 同判据——触底 + 收费即拦
 	// （判据含上游目录倍率兜底，realm 取账号所属域——粘性号已确定，无需外部传入）。
 	// 返回 nil 后 handler 侧解绑粘性（unbindSticky）走普通轮换换号，粘性号回血
 	// 后下次会话重新绑定。
-	// 日志频次：天然每请求至多一条——首次返回 nil 即解绑，后续轮转不再调入本路径
-	// （无需额外节流）；粘性续期中每个新请求一条，恰好是「余额仍在线下」的持续提醒。
 	if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
 		log.Printf("WARN: [pool] credit floor: sticky acct=%s model=%s credits=%d < floor=%d, unbind (paid model held out)",
 			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.creditFloor)
-		return nil
+		return nil, true
+	}
+	// 主动软避障（粘性路径）：若当前号达到 95% 软限额，且池内有其他未触顶账号，则解绑换号保护该号免遭 6004
+	if p.tokenCeilingReached(e, model, e.a.Realm()) && p.hasOtherUnderCeilingAccount(e.a.UID, model, e.a.Realm()) {
+		log.Printf("WARN: [pool] token soft ceiling reached for sticky acct=%s model=%s, unbinding to prevent 6004",
+			logfmt.Label(e.a.UID, e.a.Nickname), model)
+		return nil, true
+	}
+	// 并发粘性分流：若粘性号当前已有在途请求 (inFlight > 0)，且池内存在其他完全空闲的可用账号，
+	// 则主动让渡本次并发请求给空闲账号，避免把并发请求叠加在单账号上触发上游 WAF 限流；
+	// 此时不解绑会话 (unbind=false)，后续串行请求依然享受会话缓存。
+	if e.inFlight.Load() > 0 && p.hasOtherIdleAccount(e.a.UID, model, e.a.Realm()) {
+		return nil, false
 	}
 	if p.inFlightFull(e) {
-		return nil
+		return nil, true
 	}
 	e.lastUsed = now
 	p.pickSeq++
 	e.usedSeq = p.pickSeq
-	return e.a
+	return e.a, false
+}
+
+// PickByUIDForModel 同 PickByUID，但用 healthyForModel 校验：绑定号在当前模型被
+// 6004 限流时返回 nil，让调用方（handler）解绑并回落普通轮换。
+// 这是粘性能"换得动"的关键：绑定只记 uid，若只按账号级 healthy 校验，
+// 被模型级限额的号（账号整体仍健康）会被持续选中直到轮换次数耗尽。
+func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
+	a, _ := p.PickStickyForModel(uid, model, "")
+	return a
 }
 
 // PickByUID 若 uid 当前 healthy 且未占满在途名额，返回其凭证（记录 lastUsed 防撞号）；
@@ -522,7 +545,7 @@ func (p *Pool) ServableForRealm(realm string) bool {
 	return false
 }
 
-// List 返回所有账号状态（按 UID 排序，稳定输出）。
+// List 返回所有账号状态（按用户自定义顺序优先，其余按 UID 字典序补齐）。
 func (p *Pool) List() []Status {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -531,9 +554,23 @@ func (p *Pool) List() []Status {
 		uids = append(uids, uid)
 	}
 	sort.Strings(uids)
+
 	out := make([]Status, 0, len(uids))
+	seen := make(map[string]bool, len(uids))
+
+	// 先按用户自定义顺序加入账号
+	for _, uid := range p.order {
+		if e, ok := p.byUID[uid]; ok && !seen[uid] {
+			seen[uid] = true
+			out = append(out, p.statusOf(uid, e))
+		}
+	}
+	// 其余未在 order 中的账号按 UID 字典序补齐
 	for _, uid := range uids {
-		out = append(out, p.statusOf(uid, p.byUID[uid]))
+		if !seen[uid] {
+			seen[uid] = true
+			out = append(out, p.statusOf(uid, p.byUID[uid]))
+		}
 	}
 	return out
 }

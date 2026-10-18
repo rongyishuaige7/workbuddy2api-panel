@@ -353,3 +353,39 @@ func TestCacheTokensPersistRoundtrip(t *testing.T) {
 		t.Fatalf("恢复后 cache_hit_rate=%v want 75", snap.CreditByModel[0].CacheHitRate)
 	}
 }
+
+func TestTokensInWindow(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	// 2小时前消耗 1000 tokens
+	r.Add(now.Add(-2*time.Hour), "global", "uid_a", "deepseek-v4.1-flash", Delta{TotalTokens: 1000, HasTotal: true}, true)
+	// 5小时前消耗 2000 tokens
+	r.Add(now.Add(-5*time.Hour), "global", "uid_a", "deepseek-v4.1-flash", Delta{TotalTokens: 2000, HasTotal: true}, true)
+	// 30小时前消耗 5000 tokens (超出24小时)
+	r.Add(now.Add(-30*time.Hour), "global", "uid_a", "deepseek-v4.1-flash", Delta{TotalTokens: 5000, HasTotal: true}, true)
+	// 另一个模型消耗 10000 tokens
+	r.Add(now.Add(-1*time.Hour), "global", "uid_a", "gpt-5.4", Delta{TotalTokens: 10000, HasTotal: true}, true)
+	// 另一个账号消耗 3000 tokens
+	r.Add(now.Add(-1*time.Hour), "global", "uid_b", "deepseek-v4.1-flash", Delta{TotalTokens: 3000, HasTotal: true}, true)
+
+	// 24小时窗口内 uid_a 的 deepseek-v4.1-flash 应该是 1000 + 2000 = 3000
+	if got := r.TokensInWindow("uid_a", "deepseek-v4.1-flash", 24*time.Hour); got != 3000 {
+		t.Fatalf("TokensInWindow 24h = %d, want 3000", got)
+	}
+	// 3小时窗口内应该是 1000
+	if got := r.TokensInWindow("uid_a", "deepseek-v4.1-flash", 3*time.Hour); got != 1000 {
+		t.Fatalf("TokensInWindow 3h = %d, want 1000", got)
+	}
+	// 48小时窗口内应该是 1000 + 2000 + 5000 = 8000
+	if got := r.TokensInWindow("uid_a", "deepseek-v4.1-flash", 48*time.Hour); got != 8000 {
+		t.Fatalf("TokensInWindow 48h = %d, want 8000", got)
+	}
+	// 空参数或不匹配时为 0
+	if got := r.TokensInWindow("uid_a", "non-existent", 24*time.Hour); got != 0 {
+		t.Fatalf("TokensInWindow non-existent = %d, want 0", got)
+	}
+	if got := r.TokensInWindow("", "deepseek-v4.1-flash", 24*time.Hour); got != 0 {
+		t.Fatalf("TokensInWindow empty uid = %d, want 0", got)
+	}
+}
+
