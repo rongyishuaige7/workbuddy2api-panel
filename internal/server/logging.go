@@ -54,6 +54,9 @@ type chatStat struct {
 	requestID        string
 	outcome          string
 	attempts         int
+	sessionHash      string
+	requestBytes     int
+	attemptDetails   []reqlog.Attempt
 	credit           float64
 	hasCredit        bool
 	promptTokens     int64
@@ -79,7 +82,7 @@ func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1, requestBytes: len(body)}
 }
 
 // done 幂等落一行表格日志。
@@ -415,6 +418,9 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.Outcome = s.outcome
 		e.TTFBMs = s.ttfb.Milliseconds()
 		e.Attempts = s.attempts
+		e.SessionHash = s.sessionHash
+		e.RequestBytes = s.requestBytes
+		e.AttemptDetails = s.attemptDetails
 		e.PromptTokens = s.promptTokens
 		e.CompletionTokens = s.completionTokens
 		e.TotalTokens = s.totalTokens

@@ -73,6 +73,9 @@ type Event struct {
 	DurationMs       int64     `json:"duration_ms"`
 	TTFBMs           int64     `json:"ttfb_ms,omitempty"`
 	Attempts         int       `json:"attempts,omitempty"`
+	SessionHash      string    `json:"session_hash,omitempty"`
+	RequestBytes     int       `json:"request_bytes,omitempty"` // 入站 JSON 字节数，非上游改写后大小
+	AttemptDetails   []Attempt `json:"attempt_details,omitempty"`
 	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64     `json:"completion_tokens,omitempty"`
 	TotalTokens      int64     `json:"total_tokens,omitempty"`
@@ -80,10 +83,28 @@ type Event struct {
 	HasCredit        bool      `json:"credit_known"`
 	// CacheHitTokens / CacheMissTokens 上游前缀缓存命中/未命中 token（issue #92）。
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。
-	CacheHitTokens  int64 `json:"cache_hit_tokens,omitempty"`
-	CacheMissTokens int64 `json:"cache_miss_tokens,omitempty"`
-	ClientIP         string    `json:"client_ip,omitempty"`
-	UserAgent        string    `json:"user_agent,omitempty"`
+	CacheHitTokens  int64  `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
+	ClientIP        string `json:"client_ip,omitempty"`
+	UserAgent       string `json:"user_agent,omitempty"`
+}
+
+// Attempt 只记录一次 chat 出站的结构化诊断，不保存正文或任何鉴权字段。
+// HTTP 200 中的 SSE 业务错误仍保留 upstream_status=200，由 error_kind/code 区分。
+type Attempt struct {
+	StartedAt         time.Time `json:"started_at"`
+	Account           string    `json:"account"`
+	Realm             string    `json:"realm"`
+	Route             string    `json:"route"`
+	UpstreamStatus    int       `json:"upstream_status,omitempty"`
+	ErrorKind         string    `json:"error_kind,omitempty"`
+	BusinessCode      string    `json:"business_code,omitempty"`
+	UpstreamRequestID string    `json:"upstream_request_id,omitempty"`
+	RetryAfterMs      int64     `json:"retry_after_ms,omitempty"`
+	DurationMs        int64     `json:"duration_ms"`
+	PromptTokens      int64     `json:"prompt_tokens,omitempty"`
+	CacheHitTokens    int64     `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens   int64     `json:"cache_miss_tokens,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），

@@ -562,6 +562,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
+	st.sessionHash = sessionHash(sessKey)
 	stickyUID := ""
 	temporaryOffload := false
 	if h.cfg.Session != nil && sessKey != "" {
@@ -610,6 +611,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ttfb 首 token 等待（仅流式有观测；非流式传 0 = 无观测，速率不扣减）。
 	// 显式入参而不是读 st.ttfb：后者在流式分支里是**调用之后**才赋值的，
 	// 靠顺序传递会让将来重排代码时静默把速率算回旧的错口径。
+	var attempt reqlog.Attempt
 	recordAttempt := func(uid string, delta pool.TokenUsageDelta, credit float64, hasCredit bool, started time.Time, ttfb time.Duration) {
 		st.attempts++
 		if delta.HasPromptTokens {
@@ -634,6 +636,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		delta.HasLatencyMs = true
 		delta.LatencyMs = latencyMs
+		attempt.PromptTokens = delta.PromptTokens
+		attempt.CacheHitTokens, attempt.CacheMissTokens = st.cacheHit, st.cacheMiss
+		st.recordAttemptDetail(attempt, started, latencyMs)
 
 		// HasCompletionTokens 是「本次有没有 token 观测」的独立判断，与速率怎么算
 		// 无关，所以留在调用点；速率本身的边界（TTFB 缺失/超界）收在 tokensPerSecond。
@@ -737,6 +742,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
+		route := "balanced"
+		if temporaryOffload {
+			route = "temporary_offload"
+		}
 		// 选号：粘性号优先（PickStickyForModel 已校验该模型可用性 + 并发分流 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
@@ -744,6 +753,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			held, unbind = h.cfg.Pool.PickStickyLease(stickyUID, bareModel, realm)
 			if held != nil {
 				acct = held.Auth
+				route = "sticky"
 			}
 			if unbind {
 				// 粘性号在当前模型不可用（冷却/该模型被 6004 限额/积分保底/软限额）或 realm 不符 → 解绑，
@@ -755,6 +765,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 保留会话在 SessionStore 的粘性绑定（后续串行请求继续粘性复用 prompt_cache_key），
 				// 仅在当前请求循环重试内清除本地 stickyUID，避免重试重复尝试繁忙号。
 				temporaryOffload = true
+				route = "temporary_offload"
 				stickyUID = ""
 			}
 		}
@@ -806,7 +817,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
+		attempt = reqlog.Attempt{Account: logfmt.Label(acct.UID, acct.Nickname), Realm: lastRealm, Route: route}
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
+		attempt.UpstreamStatus = status
+		noteAttemptError(&attempt, terr, string(respBody))
 		var resp map[string]any
 		if terr == nil && status < 400 && !peek.Stream {
 			var aggregateErr error
@@ -817,7 +831,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if errors.As(aggregateErr, &frameErr) {
 					terr = frameErr
 					respBody = []byte(frameErr.Msg)
+					noteAttemptError(&attempt, frameErr, frameErr.Msg)
 				} else {
+					attempt.ErrorKind = "parse_error"
 					recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 					writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", aggregateErr.Error())
 					st.status = http.StatusBadGateway
@@ -846,6 +862,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// **客户端仍在但 ctx 被取消**——那只能是我们自己的空闲看门狗掐的流，
 			// 也就是上游停滞。客户端主动断连时 r.Context() 已取消，走下面的抖动分支。
 			if isUpstreamTimeout(terr, r.Context().Err() != nil) {
+				attempt.ErrorKind = "upstream_timeout"
 				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 				st.status = http.StatusServiceUnavailable
 				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, terr)
@@ -1001,6 +1018,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				upstream.WithMarkupRepair(repair))
 			switch {
 			case upstream.IsEmptyStreamError(sErr):
+				attempt.ErrorKind = "empty_stream"
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
 				// 兜底（HTTP 头已发出只能 200），但这是上游缺陷不是成功——日志/
 				// 状态收敛到 502 观测，与非流式 Aggregate 空流→502 upstream_parse
@@ -1011,6 +1029,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeStreamError
 				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
 			case errFrame != "":
+				noteAttemptError(&attempt, upstream.FrameError(errFrame), errFrame)
 				// 上游以 error 帧报错（6004 限流 / 内容拦截 / 审核）：按帧内容分类并
 				// 处置账号——**不记成功、不清 11102 负缓存、不绑粘性**。此前这些动作
 				// 在流开始前就做了，于是一个正在限流的号被当成健康号，粘性还会把
@@ -1022,6 +1041,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
 			case sErr != nil:
+				attempt.ErrorKind = "interrupted"
 				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
 				// （与 default 同语义），请求日志归为 Interrupted（人已走，未完成）。
 				st.outcome = reqlog.OutcomeInterrupted

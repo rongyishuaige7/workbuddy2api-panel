@@ -363,6 +363,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
+
+请求归档与 `request_metrics` / `request_logs` 返回 `session_hash`、入站 JSON 字节数 `request_bytes` 及 `attempt_details`。逐次尝试包含账号标签、域、选号来源、上游 HTTP 状态、数值业务码、错误类别、`Retry-After` 毫秒数、耗时和缓存用量；HTTP 200 中的 SSE 业务错误单独标记。每个请求最多保留 16 条尝试详情（超出时保留首批与最后一条），不记录原始会话 ID、提示词、响应正文或鉴权信息。
 | `cooldown.soft_rate` | `600s` | 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
