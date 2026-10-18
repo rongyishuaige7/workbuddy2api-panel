@@ -159,6 +159,13 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 				ResetAt: resetAt,
 				Reason:  reason,
 			}
+		} else if base <= 0 {
+			// 显式 0 = 不冷却：清掉账号级 until 与退避计数，避免以后把基数调回
+			// 正值时继承一个虚高的 softStreak。
+			e.until = time.Time{}
+			e.coolKind = CoolSoft
+			e.reason = reason
+			e.softStreak = 0
 		} else {
 			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
 			// softRateMax）。注意：**在软冷却中**（until 未到期）时不推进/不延长。
@@ -362,6 +369,10 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 		now := time.Now()
 		if !resetAt.IsZero() {
 			e.until = p.softResetUntilLocked(e, now, resetAt)
+		} else if base <= 0 {
+			// 显式 0 = 不冷却：清 until 与退避计数（防止以后调回正值时继承旧 streak）。
+			e.until = time.Time{}
+			e.softStreak = 0
 		} else if e.coolKind != CoolSoft || !now.Before(e.until) {
 			// 新限流（不在有效软冷却中）：推进有界退避；兜底探测（仍在软冷却中）不翻倍。
 			d := p.softDurationLocked(base, e.softStreak+1)
@@ -411,6 +422,12 @@ func (p *Pool) softRateMaxOr() time.Duration {
 // 左移位数受 softStreakShiftMax 限制，避免 streak 极大时移位溢出。
 // 调用方必须已持有 p.mu。
 func (p *Pool) softDurationLocked(d time.Duration, streak int) time.Duration {
+	// 显式 0 = 不冷却（global_soft_rate/global_waf_rate 的激进模式）。
+	// 必须在 streak 分支之前返回：否则 d<<shift 归零后会落到 softRateMax 兜底，
+	// 把「不冷却」反而变成 2h 封顶。
+	if d <= 0 {
+		return 0
+	}
 	if streak <= 1 {
 		return d
 	}

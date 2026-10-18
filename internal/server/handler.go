@@ -41,7 +41,14 @@ type Config struct {
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
 	RedisMode    string
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
-	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	// GlobalSoftCooldown global 域 429/14003 的账号级软冷却基数；0 = 不冷却。
+	// 与 CN 的 SoftCooldown 解耦：14003 通常是短时突发限流，600s 会把一次瞬时
+	// 拒绝放大成整池 503。生产默认 10s（config.cooldown.global_soft_rate）。
+	GlobalSoftCooldown time.Duration
+	// GlobalWafCooldown global 域 WAF 403 的账号级软冷却基数；0 = 不冷却。
+	// WAF 是请求/IP 维度，短冷却 + 短间隔恢复试探优先保可用性。生产默认 5s。
+	GlobalWafCooldown time.Duration
+	RefreshSkew       time.Duration // token 提前刷新窗口，默认 10m
 
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
@@ -82,9 +89,11 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		return h.cfg.Live.Load()
 	}
 	return livecfg.Snapshot{
-		APIKey:           h.cfg.APIKey,
-		SoftCooldown:     h.cfg.SoftCooldown,
-		RecordClientInfo: h.cfg.RecordClientInfo,
+		APIKey:             h.cfg.APIKey,
+		SoftCooldown:       h.cfg.SoftCooldown,
+		GlobalSoftCooldown: h.cfg.GlobalSoftCooldown,
+		GlobalWafCooldown:  h.cfg.GlobalWafCooldown,
+		RecordClientInfo:   h.cfg.RecordClientInfo,
 	}
 }
 
@@ -97,6 +106,25 @@ func (h *Handler) softCooldown() time.Duration {
 		return h.cfg.SoftCooldown
 	}
 	return 600 * time.Second
+}
+
+// globalSoftCooldown 返回 global 域 429/14003 的账号级冷却基数。
+// 0 是合法值（不冷却）；生产默认由 config.cooldown.global_soft_rate 注入（10s）。
+// 热改经 livecfg 快照立即生效。
+func (h *Handler) globalSoftCooldown() time.Duration {
+	if d := h.loadLive().GlobalSoftCooldown; d >= 0 {
+		return d
+	}
+	return 0
+}
+
+// globalWafCooldown 返回 global 域 WAF 403 的账号级冷却基数。
+// 0 是合法值（不冷却）；生产默认 5s。热改经 livecfg 快照立即生效。
+func (h *Handler) globalWafCooldown() time.Duration {
+	if d := h.loadLive().GlobalWafCooldown; d >= 0 {
+		return d
+	}
+	return 0
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -944,7 +972,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 审核，轮转纯属浪费时间。不罚账号（ErrContentBlocked 分支无冷却/熔断/NoteError）。
 				// error-passthrough：message 装上游 body 原文（code/msg/requestId 原样），
 				// 不再改写成网关固定文案——客户端必须看到真实错误才能排查。
-				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, realm, uerr)
 				fail(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
@@ -968,7 +996,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// message 装上游 body 原文（含真实 token 数与上限值——上游原文是最有价值
 			// 的错误信息，客户端必须看到，禁止固定词覆盖）。
 			if kind == upstream.ErrPromptTooLong {
-				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, realm, uerr)
 				fail(acct.UID)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
 					h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr))
@@ -979,7 +1007,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 图片格式/数据无效：立即透传上游原文回客户端，不罚号不轮转。
 			// 同一 body 换账号仍是同样的解析结果，轮转只会放大无效请求。
 			if kind == upstream.ErrImageInvalid {
-				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, realm, uerr)
 				fail(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
@@ -997,7 +1025,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 「其余保持 503」，把确定失败的请求伪装成"账号不可用、稍后再试"，
 			// 客户端于是对必然失败的请求无限重试。立即透传上游原文回 400。
 			if kind == upstream.ErrBadParams {
-				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, realm, uerr)
 				fail(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
@@ -1012,7 +1040,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
-			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, realm, uerr)
 			fail(acct.UID)
 			// CN 保留原有短窗止损。global 现场存在多号 WAF 与成功调用并存，
 			// 不能据此宣布整 IP 不可用：只冷却失败账号，在 MaxRotate 内有限迁移。
@@ -1066,7 +1094,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 在流开始前就做了，于是一个正在限流的号被当成健康号，粘性还会把
 				// 整个会话钉在它身上，后续每轮都失败。
 				kind := upstream.FrameKind(errFrame)
-				h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, nil)
+				h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, realm, nil)
 				st.status = http.StatusServiceUnavailable
 				st.outcome = reqlog.OutcomeStreamError
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
@@ -1368,10 +1396,12 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 //   - ErrSoftRate → 优先对齐上游重置墙钟（带「将在 … 重置」时 6004 走模型级豁免、
 //     非 6004 走账号级，均不指数堆加）；无重置时间才走有界退避。冷却时长优先采信
 //     Retry-After 头（uerr.RetryAfter，body 文案墙钟之外的头形态来源）。
+//     global 域无重置时间时使用 cooldown.global_soft_rate（默认 10s，0=不冷却），
+//     不再沿用 CN 的 soft_rate=600s——14003 通常是短时吞吐限制。
 //   - ErrWafBlock → 账号级软冷却：**不 Disable**——WAF 403 是 IP/指纹维频控信号，
-//     罚过即走、到期自愈。时长优先 Retry-After 头；缺失按 wafCooldownBase(60s)
-//     起 · softStreak 指数、封顶 soft_rate_max 的既有 CooldownSoftRate 有界退避。
-//     基数经 jitterDur 抖动（防多账号同相位冷却到期再聚团）。
+//     罚过即走、到期自愈。时长优先 Retry-After 头；缺失时 CN 用 wafCooldownBase(60s)、
+//     global 用 cooldown.global_waf_rate（默认 5s，0=不冷却），再经 softStreak 指数、
+//     封顶 soft_rate_max。基数经 jitterDur 抖动（防多账号同相位冷却到期再聚团）。
 //   - ErrNotFound → Cooldown(CoolSoft, notFoundCooldown 固定 60s)：短冷却防雪崩。
 //   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
 //   - ErrContentBlocked → 不罚账号；passthrough 首遇触发降级重试，最终仍拦则回 400。
@@ -1389,9 +1419,10 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 //     额外喂连败计数（NoteFailures，issue #114）：未知 4xx 连败 N 次临时出池。
 //
 // body 仅在 ErrSoftRate/ErrAccountFault 分支用于解析重置时间/分野；model 为请求
-// 携带的模型名。uerr 是 ChatStreamContext 返回的分类信封（可携带 RetryAfter）；
+// 携带的模型名；realm 为 resolveModel 解析出的域（cn/global），用于选择 global
+// 激进短冷却基数。uerr 是 ChatStreamContext 返回的分类信封（可携带 RetryAfter）；
 // 零值/防御路径下为 nil，冷却时长回落既有计算。
-func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) {
+func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model, realm string, uerr *upstream.Error) {
 	switch kind {
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
@@ -1402,41 +1433,54 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 6004 还是 11140 rate-limiting 等形态，都精确冷却到该墙钟、绝不指数堆加。
 		//   - 模型级（6004）→ CooldownSoftForModel：写 modelCooldowns[model]，切模型豁免。
 		//   - 账号级（非 6004）→ CooldownSoftRate：写账号级 until，不产生模型豁免。
+		//
+		// global 域激进策略：14003「too many requests」通常没有重置文案，若沿用
+		// soft_rate=600s，一次大请求的瞬时吞吐限制会把账号锁 10 分钟并耗尽整池。
+		// 因此 global 无重置时间时使用 cooldown.global_soft_rate（默认 10s，0=不冷却）；
+		// 有上游明确重置时间 / Retry-After 时仍尊重上游口径。
+		base := h.softCooldown()
+		if realm == "global" {
+			base = h.globalSoftCooldown()
+		}
 		modelRateLimited := upstream.IsModelRateLimit(body)
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
 			if modelRateLimited {
-				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "6004 model rate limit")
+				h.cfg.Pool.CooldownSoftForModel(uid, base, resetAt, model, "6004 model rate limit")
 				return
 			}
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
+			h.cfg.Pool.CooldownSoftRate(uid, base, resetAt, "429 rate limit")
 			return
 		}
 		// body 无重置文案但带 Retry-After 头 → 冷却到该时刻（不做指数堆加）。
 		// 头优先于「有界退避」，但低于 body 重置文案（文案是上游更权威的口径）。
 		if uerr != nil && uerr.RetryAfter > 0 {
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
+			h.cfg.Pool.CooldownSoftRate(uid, base, time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
 			if modelRateLimited {
 				h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
 			}
 			return
 		}
-		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶
-		// soft_rate_max；已在冷却中的兜底探测不翻倍）。基数取 h.softCooldown()
-		// （热改优先），管理面板改 soft_rate 后立即生效。
-		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
+		// 无重置时间 → 账号级有界退避（基数起、softStreak 翻倍、封顶
+		// soft_rate_max；已在冷却中的兜底探测不翻倍）。基数取上面按 realm
+		// 选出的值（热改优先），管理面板改配置后立即生效。
+		h.cfg.Pool.CooldownSoftRate(uid, base, time.Time{}, "429 rate limit")
 		if modelRateLimited {
 			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
 		}
 	case upstream.ErrWafBlock:
-		// WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族：基数
-		// wafCooldownBase（60s，抖动后落 [45s,75s]）、softStreak 指数升级、封顶
-		// soft_rate_max、冷却中兜底探测不翻倍——全部继承既有语义。
+		// WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族。
+		// CN 保留 wafCooldownBase=60s；global 用 cooldown.global_waf_rate（默认 5s，
+		// 0=不冷却）——WAF 是请求/IP 维度，短冷却 + 短间隔恢复试探优先保可用性。
 		// Retry-After 头优先（WAF 拦截页可能带该头）。不 Disable。
+		base := wafCooldownBase
+		if realm == "global" {
+			base = h.globalWafCooldown()
+		}
 		if uerr != nil && uerr.RetryAfter > 0 {
-			h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Now().Add(uerr.RetryAfter), "waf 403 block (retry-after)")
+			h.cfg.Pool.CooldownSoftRate(uid, jitterDur(base), time.Now().Add(uerr.RetryAfter), "waf 403 block (retry-after)")
 			return
 		}
-		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
+		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(base), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
 		h.cfg.Pool.Disable(uid, "12153 session dead")
 	case upstream.ErrNotFound:

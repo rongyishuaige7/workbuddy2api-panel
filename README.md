@@ -59,7 +59,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 |---|---|
 | 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程，自动落盘凭证并重启容器加载新账号 |
 | 🔄 **多账号池** | 快过期积分加权 + 成本分层 + 加权随机选号，Top-5 候选 + 防惊群 |
-| 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
+| 🛡️ **熔断与冷却** | CN 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）；global 域 14003/WAF 使用独立短冷却（默认 10s/5s，可配 `0` 关闭）；404 固定 60s、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点）+ 夜猫子（23 点）+ 成长任务队列（01 点），六类独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
@@ -363,8 +363,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
-| `cooldown.soft_rate` | `600s` | 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
+| `cooldown.soft_rate` | `600s` | CN 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
+| `cooldown.global_soft_rate` | `10s` | global 域 429/14003 的账号级冷却基数；`0` = 不冷却。14003 通常是短时吞吐限流，默认不再按 600s 锁号 |
+| `cooldown.global_waf_rate` | `5s` | global 域 WAF 403 的账号级冷却基数；`0` = 不冷却。WAF 是请求/IP 维度，短冷却优先保可用性 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
 | `schedule.travel_hours` | `[9, 21]` | 每日本地时区整点推进猫猫旅行状态机（领养 / 派出 / 领奖） |
 | `schedule.activity_hours` | `[10]` | 每日本地时区整点对话活跃上报（点亮连登 + 解锁 `first_buddy`） |
@@ -500,9 +502,11 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 **熔断器**：所有冷却入口与 5xx 共用唯一连续失败计数器 `fails`；累计达 `breaker_threshold`（默认 3）触发熔断，退避 `breaker_cooldown × 2^retryCount`，封顶 `6h`；成功清零。
 
-**软冷却指数退避**（与熔断器并存的第二条升级线）：软限流的**冷却时长**本身也按连续次数退避——同一账号连续触发软冷却时 `soft_rate × 2^(连续次数-1)`，封顶 `soft_rate_max`。计数 `soft_streak` 独立于熔断器的 `fails`，只在**成功**或**签到解冻**时清零，随 `state.json` 持久化。
+**软冷却指数退避**（与熔断器并存的第二条升级线）：软限流的**冷却时长**本身也按连续次数退避——同一账号连续触发软冷却时 `soft_rate × 2^(连续次数-1)`，封顶 `soft_rate_max`。global 域的基数不是 `soft_rate`，而是 `cooldown.global_soft_rate`（429/14003）与 `cooldown.global_waf_rate`（WAF），两者默认 10s/5s，显式 `0` 关闭。计数 `soft_streak` 独立于熔断器的 `fails`，只在**成功**或**签到解冻**时清零，随 `state.json` 持久化。
 
-国际版遇到 WAF 403 时只避让失败账号，在既有 `MaxRotate`（默认 3 次）内有限换号；多个账号 WAF 不再直接解释为整个出口 IP 被封，也不影响 CN 的 WAF 止损窗口。国际账号的真实软冷却到期前不参与全池恢复兜底；上游明确给出的恢复时间或 `Retry-After` 不受未知限流退避的两小时封顶截短。
+国际版遇到 WAF 403 时只避让失败账号，在既有 `MaxRotate`（默认 3 次）内有限换号；多个账号 WAF 不再直接解释为整个出口 IP 被封，也不影响 CN 的 WAF 止损窗口。global 的 429/14003 与 WAF 使用独立短冷却（默认 10s / 5s，`0` = 不冷却）：剩余冷却不超过 30s 的账号允许在 3 秒节流后做恢复试探，避免一次瞬时拒绝把整池锁成 503；剩余冷却超过 30s 或上游明确给出的重置时间仍必须等待，`Retry-After` 也不受未知限流退避的两小时封顶截短。
+
+**global 14003 的特殊处理**：上游对超大请求/连续请求常返回 `429 code=14003 too many requests`，响应没有 `Retry-After` 或重置文案。此前它按 CN 的 `soft_rate=600s` 冷却，一次大请求就会把一个账号锁 10 分钟，轮转几轮后整池 503。现在 global 无重置时间时使用 `cooldown.global_soft_rate`（默认 10s，`0` 关闭），并允许 3 秒节流后的恢复试探；上游明确给出重置时间时仍按该时间冷却。CN 行为不变。
 
 ### 选号策略
 
@@ -660,12 +664,15 @@ http://127.0.0.1:7863/panel/
 
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
 
-**配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
-`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
+**配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`cooldown.global_soft_rate`、`cooldown.global_waf_rate`、
+`features.sanitize_blacklist_fingerprints`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、
+`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
 涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`global.*`、`upstash.*`、
 `session_sticky.enabled/ttl/gc_interval`、`prompt.mode/file`、`logging.request_archive_*`、`server.read_timeout`）
 保存后**只在值真实发生变化时**返回"需重启"清单，面板提示会列出具体字段名。配置写入采用「深合并且原子替换」：
 只更新面板表单覆盖的键，用户手写的未知键与其余字段原样保留。
+
+> 面板「测活」是合成的小请求（`user="1"`, `max_tokens=3`），与真实流量不同：测到 6004 只回报到弹窗并打一条 WARN，**不写路由冷却**。真实账号/模型冷却只由真实 `/v1/chat/completions` 请求触发。
 
 ### 面板接口（`/panel/api/*`）
 

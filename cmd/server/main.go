@@ -235,6 +235,8 @@ func main() {
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
 		SoftCooldown:         cfg.SoftRateDur,
+		GlobalSoftCooldown:   cfg.GlobalSoftRateDur,
+		GlobalWafCooldown:    cfg.GlobalWafRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
 	})
@@ -295,19 +297,21 @@ func main() {
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
-		SoftCooldown: cfg.SoftRateDur,
-		Panel:        pn,
-		Live:         live,
-		Usage:        rec,
-		RequestLog:   requestLog,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
+		Pool:               p,
+		Upstream:           up,
+		APIKey:             cfg.APIKey,
+		Session:            sessRouter,
+		StickyCount:        sessCount,
+		RedisMode:          redisMode,
+		SoftCooldown:       cfg.SoftRateDur,
+		GlobalSoftCooldown: cfg.GlobalSoftRateDur,
+		GlobalWafCooldown:  cfg.GlobalWafRateDur,
+		Panel:              pn,
+		Live:               live,
+		Usage:              rec,
+		RequestLog:         requestLog,
+		PromptMode:         cfg.Prompt.Mode,
+		PromptText:         cfg.PromptText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -491,6 +495,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
 		SoftCooldown:         newCfg.SoftRateDur,
+		GlobalSoftCooldown:   newCfg.GlobalSoftRateDur,
+		GlobalWafCooldown:    newCfg.GlobalWafRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
 	})

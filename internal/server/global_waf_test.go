@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -39,7 +40,7 @@ func TestWAFRotationScopedToRealm(t *testing.T) {
 			)
 			p.SetCredits("bad1", 3000, 3000)
 			p.SetCredits("bad2", 2000, 2000)
-			h := NewHandler(Config{Pool: p, Upstream: up, GlobalEnabled: true})
+			h := NewHandler(Config{Pool: p, Upstream: up, GlobalEnabled: true, GlobalWafCooldown: 5 * time.Second})
 			body := fmt.Sprintf(`{"model":"%s:deepseek-v4.1-flash","messages":[{"role":"user","content":"hello"}],"stream":%v}`, tc.realm, tc.stream)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))

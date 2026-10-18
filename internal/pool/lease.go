@@ -25,7 +25,11 @@ func (l *Lease) Release() {
 			releaseEntry(l.entry)
 			if l.recovery {
 				l.entry.recoveryInFlight = false
-				l.entry.nextRecovery = time.Now().Add(recoveryProbeInterval)
+				interval := recoveryProbeInterval
+				if l.entry.a.IsGlobal() {
+					interval = globalRecoveryProbeInterval
+				}
+				l.entry.nextRecovery = time.Now().Add(interval)
 			}
 		})
 	}

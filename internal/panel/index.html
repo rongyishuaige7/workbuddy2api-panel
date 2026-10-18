@@ -1036,6 +1036,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="breaker_cooldown" placeholder="30m"></label>
             </div>
             <div class="grid3">
+              <label class="fld"><span class="lb">国际版 429 冷却基数</span>
+                <input name="global_soft_rate" placeholder="10s">
+                <span class="hint">14003 短冷却；0 = 不冷却</span></label>
+              <label class="fld"><span class="lb">国际版 WAF 冷却基数</span>
+                <input name="global_waf_rate" placeholder="5s">
+                <span class="hint">WAF 403 短冷却；0 = 不冷却</span></label>
+            </div>
+            <div class="grid3">
               <label class="fld"><span class="lb">熔断退避上限</span>
                 <input name="breaker_cooldown_max" placeholder="6h"></label>
               <label class="fld"><span class="lb">连败降权阈值</span>

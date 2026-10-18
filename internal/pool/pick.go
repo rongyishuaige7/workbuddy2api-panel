@@ -383,7 +383,12 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
 		}
 		if e.a.IsGlobal() && e.coolKind == CoolSoft && now.Before(e.until) {
-			continue // 国际账号真实 429/WAF 冷却必须到期；兜底不能逐请求重新撞上游
+			// 激进恢复：global 的短冷却（429 10s / WAF 5s）允许兜底提前试探，
+			// 避免一次瞬时拒绝把整池锁死成 503。只对「剩余冷却 <= 30s」的短冷却
+			// 放行；上游给出长重置时间（分钟/小时级）仍必须等到期，不能逐请求撞。
+			if e.until.Sub(now) > globalFallbackWindow {
+				continue
+			}
 		}
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
 			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
@@ -403,7 +408,12 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		return nil
 	}
 	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.Nickname), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
-	best.nextRecovery = now.Add(recoveryProbeInterval)
+	interval := recoveryProbeInterval
+	if best.a.IsGlobal() {
+		// global 短冷却：3 秒即可再次恢复试探；CN 保持 30 秒节流。
+		interval = globalRecoveryProbeInterval
+	}
+	best.nextRecovery = now.Add(interval)
 	best.lastUsed = now
 	// 兜底同样是「选中」，必须与 pick() 正常路径、粘性命中路径（PickByUIDForModel）
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的
@@ -416,6 +426,15 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 
 // recoveryProbeInterval 限制提前恢复试探，防止全池冷却时每个请求都绕过冷却。
 const recoveryProbeInterval = 30 * time.Second
+
+// globalRecoveryProbeInterval global 域短冷却的恢复试探间隔。global 的 429/WAF
+// 冷却基数已降到 10s/5s，若仍按 30s 节流，冷却到期后仍会有大段空窗；3s 让
+// 兜底能在冷却期内低频试探，同时不会每个请求都重打。
+const globalRecoveryProbeInterval = 3 * time.Second
+
+// globalFallbackWindow 只有剩余冷却不超过该窗口的 global 软冷却号才允许兜底
+// 提前试探。10s/5s 的短冷却命中；上游明确给出分钟/小时级重置时间的号仍等待。
+const globalFallbackWindow = 30 * time.Second
 
 // inFlightFull 报告账号是否已占满在途名额（上限按 realm 分档，见 inFlightLimit；
 // limit=0 不限 → 恒 false）。调用方需已持 p.mu（读锁或写锁均可，本方法只读上限）。

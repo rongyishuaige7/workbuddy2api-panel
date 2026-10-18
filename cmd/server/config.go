@@ -61,6 +61,14 @@ type Config struct {
 		// SoftRateMax 软冷却指数退避的封顶，默认 "2h"。
 		// 空值回落默认，非法值报错（处理风格同 soft_rate）。
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
+		// GlobalSoftRate global 域 429/14003 的账号级软冷却基数，默认 "10s"。
+		// 与 CN 的 soft_rate 解耦：14003「too many requests」通常是短时突发限流，
+		// 600s 会把一次瞬时拒绝放大成整池 503。显式 "0" = 不冷却（完全激进）。
+		GlobalSoftRate string `json:"global_soft_rate"` // "10s"
+		// GlobalWafRate global 域 WAF 403 的账号级软冷却基数，默认 "5s"。
+		// WAF 是请求/IP 维度而非账号健康；短冷却 + 短间隔恢复试探优先保可用性。
+		// 显式 "0" = 不冷却。
+		GlobalWafRate string `json:"global_waf_rate"` // "5s"
 	} `json:"cooldown"`
 
 	Schedule struct {
@@ -216,6 +224,8 @@ type Config struct {
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
+	GlobalSoftRateDur      time.Duration `json:"-"`
+	GlobalWafRateDur       time.Duration `json:"-"`
 	BreakerCooldownDur     time.Duration `json:"-"`
 	BreakerCooldownMaxD    time.Duration `json:"-"`
 	DegradeCooldownDur     time.Duration `json:"-"`
@@ -240,6 +250,9 @@ func Default() *Config {
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
+	// global 域默认激进：14003 短冷却 10s、WAF 短冷却 5s；"0" 可完全关闭。
+	c.Cooldown.GlobalSoftRate = "10s"
+	c.Cooldown.GlobalWafRate = "5s"
 	c.Server.ReadTimeout = "300s"
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
@@ -482,6 +495,25 @@ func (c *Config) normalize() error {
 	}
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
+	}
+	// global 域激进冷却：空值回落默认；0 合法（不冷却）；负值无意义，fail fast。
+	if c.Cooldown.GlobalSoftRate == "" {
+		c.Cooldown.GlobalSoftRate = "10s"
+	}
+	if c.GlobalSoftRateDur, err = time.ParseDuration(c.Cooldown.GlobalSoftRate); err != nil {
+		return fmt.Errorf("cooldown.global_soft_rate: %w", err)
+	}
+	if c.GlobalSoftRateDur < 0 {
+		return fmt.Errorf("cooldown.global_soft_rate: 负时长 %q 无意义", c.Cooldown.GlobalSoftRate)
+	}
+	if c.Cooldown.GlobalWafRate == "" {
+		c.Cooldown.GlobalWafRate = "5s"
+	}
+	if c.GlobalWafRateDur, err = time.ParseDuration(c.Cooldown.GlobalWafRate); err != nil {
+		return fmt.Errorf("cooldown.global_waf_rate: %w", err)
+	}
+	if c.GlobalWafRateDur < 0 {
+		return fmt.Errorf("cooldown.global_waf_rate: 负时长 %q 无意义", c.Cooldown.GlobalWafRate)
 	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -223,23 +225,23 @@ func (p *Panel) runAccountProbe(ctx context.Context, a *auth.Auth, model string)
 		res.Error = "upstream returned no response body"
 	}
 
-	// 统一排查 6004 模型限流与官方恢复重置时刻
+	// 统一排查 6004 模型限流与官方恢复重置时刻。
+	// 测活是合成的小请求（user="1", max_tokens=3），不能代表真实流量：
+	// 这里只把 6004/重置时间回报给面板，**绝不写路由冷却**。否则点一下测活
+	// 就可能把账号/模型锁 10 分钟甚至到上游 resetAt，直接造成"一测就限流"。
 	checkStr := strings.Join([]string{string(respBody), res.Error, res.Snippet, streamChunk}, " ")
 	is6004 := !res.OK && upstream.IsModelRateLimit(string(respBody)+streamChunk)
-	if resetAt, ok := upstream.ParseRateReset(checkStr); ok && is6004 {
-		res.ResetAt = resetAt.Format(time.RFC3339)
-		rem := int64(time.Until(resetAt).Seconds())
-		if rem < 0 {
-			rem = 0
+	if is6004 {
+		if resetAt, ok := upstream.ParseRateReset(checkStr); ok {
+			res.ResetAt = resetAt.Format(time.RFC3339)
+			rem := int64(time.Until(resetAt).Seconds())
+			if rem < 0 {
+				rem = 0
+			}
+			res.ResetRemainingSec = rem
 		}
-		res.ResetRemainingSec = rem
-		if p.cfg.Pool != nil {
-			p.cfg.Pool.CooldownSoftForModel(a.UID, 10*time.Minute, resetAt, bareModel, "6004 probe rate limit")
-		}
-	} else if is6004 {
-		if p.cfg.Pool != nil {
-			p.cfg.Pool.RecordModelRateLimitAudit(a.UID, bareModel, "6004 probe rate limit")
-		}
+		log.Printf("WARN: [panel] probe %s model=%s: 6004 rate limit (no routing cooldown, reset=%s)",
+			logfmt.Label(a.UID, a.Nickname), bareModel, res.ResetAt)
 	}
 
 	return res

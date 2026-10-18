@@ -17,6 +17,8 @@ import (
 type Snapshot struct {
 	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
+	GlobalSoftCooldown   time.Duration // global 域 429/14003 冷却基数（0 = 不冷却）
+	GlobalWafCooldown    time.Duration // global 域 WAF 403 冷却基数（0 = 不冷却）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
 }

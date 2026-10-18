@@ -173,20 +173,16 @@ func TestAccountProbeEndpoint(t *testing.T) {
 		if res.ResetRemainingSec <= 0 {
 			t.Errorf("expected reset_remaining_sec > 0, got %d", res.ResetRemainingSec)
 		}
-		// Verify pool status now tracks this model rate limit
+		// 测活是合成请求：6004 只回报给面板，不得写入路由冷却。
 		st, ok := pl.Status("u2")
 		if !ok {
 			t.Fatalf("expected u2 in pool status")
 		}
-		var foundModel bool
-		for _, rlm := range st.RateLimitedModels {
-			if rlm.Model == "deepseek-v4.1-flash" {
-				foundModel = true
-				break
-			}
+		if len(st.RateLimitedModels) != 0 {
+			t.Errorf("probe must not mutate routing cooldowns, got %+v", st.RateLimitedModels)
 		}
-		if !foundModel {
-			t.Errorf("expected u2 in pool status to have deepseek-v4.1-flash in RateLimitedModels, got %+v", st.RateLimitedModels)
+		if got := pl.PickExcludingForModel(nil, "deepseek-v4.1-flash"); got == nil {
+			t.Error("probe 6004 must not remove the account from routing")
 		}
 	}
 

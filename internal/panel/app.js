@@ -1538,6 +1538,7 @@ const CFG_MAP = {
   credit_floor: ['pool', 'credit_floor'],
   prefer_expiring: ['pool', 'prefer_expiring'], expiring_soon: ['pool', 'expiring_soon'],
   soft_rate: ['cooldown', 'soft_rate'], soft_rate_max: ['cooldown', 'soft_rate_max'],
+  global_soft_rate: ['cooldown', 'global_soft_rate'], global_waf_rate: ['cooldown', 'global_waf_rate'],
   breaker_cooldown: ['pool', 'breaker_cooldown'], breaker_cooldown_max: ['pool', 'breaker_cooldown_max'],
   idle_weight_per_hour: ['pool', 'idle_weight_per_hour'], idle_weight_max: ['pool', 'idle_weight_max'],
   ttl: ['session_sticky', 'ttl'],
@@ -1610,7 +1611,8 @@ function collectConfig() {
    config.go normalize() 的 time.ParseDuration 同口径，脏值在前端就地标红，
    不再等到保存被拒。 */
 const DURATION_RE = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
-const DURATION_FIELDS = ['soft_rate', 'soft_rate_max', 'breaker_cooldown', 'breaker_cooldown_max',
+const DURATION_FIELDS = ['soft_rate', 'soft_rate_max', 'global_soft_rate', 'global_waf_rate',
+  'breaker_cooldown', 'breaker_cooldown_max',
   'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'expiring_soon', 'ttl'];
 const DURATION_TIP = '格式应为 Go 时长：30m / 2h / 600s / 1h30m';
 function durationBad(name) {
