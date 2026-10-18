@@ -48,7 +48,10 @@ type Config struct {
 	// GlobalWafCooldown global 域 WAF 403 的账号级软冷却基数；0 = 不冷却。
 	// WAF 是请求/IP 维度，短冷却 + 短间隔恢复试探优先保可用性。生产默认 5s。
 	GlobalWafCooldown time.Duration
-	RefreshSkew       time.Duration // token 提前刷新窗口，默认 10m
+	// Global6004Cooldown global 域 6004 模型锁的本地上限；0 = 不冷却。
+	// 上游 resetAt 仍展示；生产默认 5m（不锁几小时，也不每 10s 撞 6004）。
+	Global6004Cooldown time.Duration
+	RefreshSkew        time.Duration // token 提前刷新窗口，默认 10m
 
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
@@ -93,6 +96,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		SoftCooldown:       h.cfg.SoftCooldown,
 		GlobalSoftCooldown: h.cfg.GlobalSoftCooldown,
 		GlobalWafCooldown:  h.cfg.GlobalWafCooldown,
+		Global6004Cooldown: h.cfg.Global6004Cooldown,
 		RecordClientInfo:   h.cfg.RecordClientInfo,
 	}
 }
@@ -122,6 +126,15 @@ func (h *Handler) globalSoftCooldown() time.Duration {
 // 0 是合法值（不冷却）；生产默认 5s。热改经 livecfg 快照立即生效。
 func (h *Handler) globalWafCooldown() time.Duration {
 	if d := h.loadLive().GlobalWafCooldown; d >= 0 {
+		return d
+	}
+	return 0
+}
+
+// global6004Cooldown 返回 global 域 6004 模型锁的本地上限。
+// 0 = 不冷却；生产默认 5m。上游 resetAt 仍由 modelCooldown.ResetAt 展示。
+func (h *Handler) global6004Cooldown() time.Duration {
+	if d := h.loadLive().Global6004Cooldown; d >= 0 {
 		return d
 	}
 	return 0
@@ -1439,13 +1452,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 因此 global 无重置时间时使用 cooldown.global_soft_rate（默认 10s，0=不冷却）；
 		// 有上游明确重置时间 / Retry-After 时仍尊重上游口径。
 		base := h.softCooldown()
+		modelBase := base
 		if realm == "global" {
 			base = h.globalSoftCooldown()
+			// 6004 模型锁用独立的 5m 中间档，不与 429/14003 的 10s 共用。
+			modelBase = h.global6004Cooldown()
 		}
 		modelRateLimited := upstream.IsModelRateLimit(body)
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
 			if modelRateLimited {
-				h.cfg.Pool.CooldownSoftForModel(uid, base, resetAt, model, "6004 model rate limit")
+				h.cfg.Pool.CooldownSoftForModel(uid, modelBase, resetAt, model, "6004 model rate limit")
 				return
 			}
 			h.cfg.Pool.CooldownSoftRate(uid, base, resetAt, "429 rate limit")

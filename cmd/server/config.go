@@ -69,6 +69,10 @@ type Config struct {
 		// WAF 是请求/IP 维度而非账号健康；短冷却 + 短间隔恢复试探优先保可用性。
 		// 显式 "0" = 不冷却。
 		GlobalWafRate string `json:"global_waf_rate"` // "5s"
+		// Global6004Rate global 域 6004 模型锁的本地重试上限，默认 "5m"。
+		// 上游 resetAt 仍保留展示；5m 是「不锁几小时」与「不每 10s 撞 6004」
+		// 的中间档。显式 "0" = 不本地冷却（会很快重试）。
+		Global6004Rate string `json:"global_6004_rate"` // "5m"
 	} `json:"cooldown"`
 
 	Schedule struct {
@@ -226,6 +230,7 @@ type Config struct {
 	SoftRateMaxDur         time.Duration `json:"-"`
 	GlobalSoftRateDur      time.Duration `json:"-"`
 	GlobalWafRateDur       time.Duration `json:"-"`
+	Global6004RateDur      time.Duration `json:"-"`
 	BreakerCooldownDur     time.Duration `json:"-"`
 	BreakerCooldownMaxD    time.Duration `json:"-"`
 	DegradeCooldownDur     time.Duration `json:"-"`
@@ -253,6 +258,8 @@ func Default() *Config {
 	// global 域默认激进：14003 短冷却 10s、WAF 短冷却 5s；"0" 可完全关闭。
 	c.Cooldown.GlobalSoftRate = "10s"
 	c.Cooldown.GlobalWafRate = "5s"
+	// 6004 模型锁的中间档：本地最多 5m，上游 resetAt 仅展示。
+	c.Cooldown.Global6004Rate = "5m"
 	c.Server.ReadTimeout = "300s"
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
@@ -514,6 +521,15 @@ func (c *Config) normalize() error {
 	}
 	if c.GlobalWafRateDur < 0 {
 		return fmt.Errorf("cooldown.global_waf_rate: 负时长 %q 无意义", c.Cooldown.GlobalWafRate)
+	}
+	if c.Cooldown.Global6004Rate == "" {
+		c.Cooldown.Global6004Rate = "5m"
+	}
+	if c.Global6004RateDur, err = time.ParseDuration(c.Cooldown.Global6004Rate); err != nil {
+		return fmt.Errorf("cooldown.global_6004_rate: %w", err)
+	}
+	if c.Global6004RateDur < 0 {
+		return fmt.Errorf("cooldown.global_6004_rate: 负时长 %q 无意义", c.Cooldown.Global6004Rate)
 	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)

@@ -110,10 +110,9 @@ func TestGlobalRealCooldownCannotBeBypassedByFallback(t *testing.T) {
 	}
 }
 
-// TestGlobalModelAndAccountHonorReset global 6004 与账号级 429/Retry-After 都
-// 尊重上游明确 resetAt。78 分钟实测显示 10s 本地重试会反复撞 6004（四个账号
-// 各 118–131 次、98 次顶层 429），故恢复为按上游时间锁定。
-func TestGlobalModelAndAccountHonorReset(t *testing.T) {
+// TestGlobalModelLocalCapAndAccountReset global 6004 的本地模型锁以 base 为上限
+// （resetAt 仅展示）；global 账号级 429/Retry-After 仍精确遵守上游 resetAt。
+func TestGlobalModelLocalCapAndAccountReset(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "limited", Domain: "www.workbuddy.ai"})
 	p.SetSoftRateMax(time.Minute)
@@ -123,8 +122,12 @@ func TestGlobalModelAndAccountHonorReset(t *testing.T) {
 	if len(st.RateLimitedModels) != 1 {
 		t.Fatalf("model cooldown missing: %+v", st.RateLimitedModels)
 	}
-	if !st.RateLimitedModels[0].Until.Equal(reset) {
-		t.Fatalf("global model cooldown=%v want=%v", st.RateLimitedModels[0].Until, reset)
+	rl := st.RateLimitedModels[0]
+	if rem := time.Until(rl.Until); rem < 50*time.Second || rem > 70*time.Second {
+		t.Fatalf("global model cooldown=%s want ~1m (local cap)", rem)
+	}
+	if !rl.ResetAt.Equal(reset) {
+		t.Fatalf("global model reset_at=%v want=%v", rl.ResetAt, reset)
 	}
 	p.CooldownSoftRate("limited", time.Minute, reset, "429 rate limit (retry-after)")
 	st, _ = p.Status("limited")

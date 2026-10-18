@@ -1042,6 +1042,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">国际版 WAF 冷却基数</span>
                 <input name="global_waf_rate" placeholder="5s">
                 <span class="hint">WAF 403 短冷却；0 = 不冷却</span></label>
+              <label class="fld"><span class="lb">国际版 6004 本地锁</span>
+                <input name="global_6004_rate" placeholder="5m">
+                <span class="hint">模型锁本地上限；上游 resetAt 仅展示</span></label>
             </div>
             <div class="grid3">
               <label class="fld"><span class="lb">熔断退避上限</span>

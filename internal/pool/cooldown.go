@@ -150,20 +150,27 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
 		if !resetAt.IsZero() {
-			// 有上游重置时间：冷却截止 = min(resetAt, now+softRateMax)（global 尊重
-			// 上游明确 resetAt，CN 由 softResetUntilLocked 截到 softRateMax），不做
-			// 指数放大。
+			// 有上游重置时间：CN 冷却截止 = min(resetAt, now+softRateMax)，不做
+			// 指数放大。global 用传入的 base 作为本地重试上限（生产为
+			// cooldown.global_6004_rate，默认 5m）：上游 resetAt 仍写入 ResetAt
+			// 供面板展示，但不把账号锁几小时。
 			//
-			// 2026-10-18 复盘：曾尝试把 global 6004 的本地锁压到 global_soft_rate
-			// （10s），依据是单次小/81KB 请求能恢复；但随后 78 分钟内四个 global
-			// 账号各命中 118–131 次 6004、产生 98 次顶层 429——上游 6004 是持续性
-			// 单账号模型频率限制，10s 重试只会反复撞同一堵墙。故 global 6004 恢复
-			// 为按上游 resetAt 锁定，让选号避开这些账号，而不是反复换号重试。
+			// 2026-10-18 两次实测：10s 短锁在 78 分钟内造成四个账号各 118–131 次
+			// 6004、98 次顶层 429；完全按 resetAt 长锁又让单次 6004 锁 3 小时以上。
+			// 5m 是两者之间的中间档：不会每 10s 撞墙，也不会一锁几小时。
+			until := p.softResetUntilLocked(e, now, resetAt)
+			if e.a.IsGlobal() {
+				if base <= 0 {
+					until = now
+				} else if cap := now.Add(base); until.After(cap) {
+					until = cap
+				}
+			}
 			if e.modelCooldowns == nil {
 				e.modelCooldowns = map[string]modelCooldown{}
 			}
 			e.modelCooldowns[model] = modelCooldown{
-				Until:   p.softResetUntilLocked(e, now, resetAt),
+				Until:   until,
 				ResetAt: resetAt,
 				Reason:  reason,
 			}

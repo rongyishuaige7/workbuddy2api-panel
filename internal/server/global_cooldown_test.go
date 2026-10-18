@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -81,5 +82,39 @@ func TestGlobalZeroCooldownDisables(t *testing.T) {
 	}
 	if st.SoftStreak != 0 {
 		t.Fatalf("global 0s cooldown soft_streak=%d want 0", st.SoftStreak)
+	}
+}
+
+// TestGlobal6004UsesFiveMinuteCap global 6004 的本地模型锁默认 5m，
+// 上游 resetAt 保留展示；CN 仍按上游 resetAt（这里 30m）。
+func TestGlobal6004UsesFiveMinuteCap(t *testing.T) {
+	globalReset := time.Now().Add(6 * time.Hour).In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
+	globalBody := fmt.Sprintf(`{"code":6004,"msg":"您的使用量已超出频率限制，将在 %s UTC+8 重置"}`, globalReset)
+	globalPool, globalUID := newCooldownTestPool(t, "global")
+	h := NewHandler(Config{Pool: globalPool, SoftCooldown: 600 * time.Second, GlobalSoftCooldown: 10 * time.Second, GlobalWafCooldown: 5 * time.Second, Global6004Cooldown: 5 * time.Minute})
+	h.applyErrorPolicy(globalUID, upstream.ErrSoftRate, globalBody, "deepseek-v4.1-flash", "global", nil)
+	st, _ := globalPool.Status(globalUID)
+	if len(st.RateLimitedModels) != 1 {
+		t.Fatalf("global rate_limited_models=%+v", st.RateLimitedModels)
+	}
+	rl := st.RateLimitedModels[0]
+	if rem := time.Until(rl.Until); rem < 4*time.Minute || rem > 6*time.Minute {
+		t.Fatalf("global 6004 until=%s want ~5m", rem)
+	}
+	if rl.ResetAt.IsZero() {
+		t.Fatal("global 6004 reset_at must be preserved for display")
+	}
+
+	cnReset := time.Now().Add(30 * time.Minute).In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
+	cnBody := fmt.Sprintf(`{"code":6004,"msg":"您的使用量已超出频率限制，将在 %s UTC+8 重置"}`, cnReset)
+	cnPool, cnUID := newCooldownTestPool(t, "cn")
+	h = NewHandler(Config{Pool: cnPool, SoftCooldown: 600 * time.Second, GlobalSoftCooldown: 10 * time.Second, GlobalWafCooldown: 5 * time.Second, Global6004Cooldown: 5 * time.Minute})
+	h.applyErrorPolicy(cnUID, upstream.ErrSoftRate, cnBody, "deepseek-v4.1-flash", "cn", nil)
+	st, _ = cnPool.Status(cnUID)
+	if len(st.RateLimitedModels) != 1 {
+		t.Fatalf("cn rate_limited_models=%+v", st.RateLimitedModels)
+	}
+	if rem := time.Until(st.RateLimitedModels[0].Until); rem < 29*time.Minute || rem > 31*time.Minute {
+		t.Fatalf("cn 6004 until=%s want ~30m", rem)
 	}
 }

@@ -237,6 +237,7 @@ func main() {
 		SoftCooldown:         cfg.SoftRateDur,
 		GlobalSoftCooldown:   cfg.GlobalSoftRateDur,
 		GlobalWafCooldown:    cfg.GlobalWafRateDur,
+		Global6004Cooldown:   cfg.Global6004RateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
 	})
@@ -306,6 +307,7 @@ func main() {
 		SoftCooldown:       cfg.SoftRateDur,
 		GlobalSoftCooldown: cfg.GlobalSoftRateDur,
 		GlobalWafCooldown:  cfg.GlobalWafRateDur,
+		Global6004Cooldown: cfg.Global6004RateDur,
 		Panel:              pn,
 		Live:               live,
 		Usage:              rec,
@@ -497,6 +499,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		SoftCooldown:         newCfg.SoftRateDur,
 		GlobalSoftCooldown:   newCfg.GlobalSoftRateDur,
 		GlobalWafCooldown:    newCfg.GlobalWafRateDur,
+		Global6004Cooldown:   newCfg.Global6004RateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
 	})

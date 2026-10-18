@@ -19,7 +19,8 @@
     "soft_rate": "600s",
     "soft_rate_max": "2h",
     "global_soft_rate": "10s",
-    "global_waf_rate": "5s"
+    "global_waf_rate": "5s",
+    "global_6004_rate": "5m"
   },
   "schedule": {
     "checkin_hours": [9, 21],
