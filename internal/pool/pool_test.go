@@ -2011,6 +2011,7 @@ func TestResumeIdempotent(t *testing.T) {
 
 func TestTokenAwareWeighting(t *testing.T) {
 	p := New("")
+	p.SetTokenCeilingOf(func(realm, model string) int64 { return 100_000_000 })
 	now := time.Now()
 	a := &auth.Auth{UID: "u1", Domain: "www.workbuddy.ai"} // 消耗高 (80M)
 	b := &auth.Auth{UID: "u2", Domain: "www.workbuddy.ai"} // 消耗低 (10M)
@@ -2041,6 +2042,7 @@ func TestTokenAwareWeighting(t *testing.T) {
 func TestTokenSoftCeilingProtection(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
+	p.SetTokenCeilingOf(func(realm, model string) int64 { return 100_000_000 })
 	p.SetRandomSource(func(n int64) int64 { return n - 1 }) // 强制抽签尾部，优先级不能靠概率保证
 	a := &auth.Auth{UID: "u1", Domain: "www.workbuddy.ai"}  // 消耗 96M (已达 95% 软限额)
 	b := &auth.Auth{UID: "u2", Domain: "www.workbuddy.ai"}  // 消耗 20M

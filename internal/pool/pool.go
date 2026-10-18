@@ -253,7 +253,7 @@ func (p *Pool) SetTokenUsageOf(fn func(uid, model string, window time.Duration) 
 	p.tokenUsageOf = fn
 }
 
-// SetTokenCeilingOf 注入单日 Token 配额上限查询回调。nil 时使用系统内置默认（DeepSeek: global 1亿, cn 2亿）。
+// SetTokenCeilingOf 注入经确认的 Token 配额估计。CN 保留内置默认，global 默认不估计。
 func (p *Pool) SetTokenCeilingOf(fn func(realm, model string) int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -270,13 +270,11 @@ func (p *Pool) effectiveTokenCeiling(realm, model string) int64 {
 	return defaultTokenCeiling(realm, model)
 }
 
-// defaultTokenCeiling 默认单日 Token 上限（DeepSeek 系列：global 1 亿，cn 2 亿）。
+// defaultTokenCeiling 保留 CN 的现有估计；global 无权威额度/周期证据，不能
+// 根据累计（含大量缓存命中）用量主动迁移稳定会话。真实 429 与模型锁独立生效。
 func defaultTokenCeiling(realm, model string) int64 {
 	m := strings.ToLower(model)
-	if strings.HasPrefix(m, "deepseek") {
-		if realm == "global" {
-			return 100_000_000 // 国际版 1 亿 tokens
-		}
+	if realm != "global" && strings.HasPrefix(m, "deepseek") {
 		return 200_000_000 // 国内版 2 亿 tokens
 	}
 	return 0
