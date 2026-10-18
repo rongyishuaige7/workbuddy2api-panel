@@ -2041,8 +2041,9 @@ func TestTokenAwareWeighting(t *testing.T) {
 func TestTokenSoftCeilingProtection(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
-	a := &auth.Auth{UID: "u1", Domain: "www.workbuddy.ai"} // 消耗 96M (已达 95% 软限额)
-	b := &auth.Auth{UID: "u2", Domain: "www.workbuddy.ai"} // 消耗 20M
+	p.SetRandomSource(func(n int64) int64 { return n - 1 }) // 强制抽签尾部，优先级不能靠概率保证
+	a := &auth.Auth{UID: "u1", Domain: "www.workbuddy.ai"}  // 消耗 96M (已达 95% 软限额)
+	b := &auth.Auth{UID: "u2", Domain: "www.workbuddy.ai"}  // 消耗 20M
 	p.Add(a)
 	p.Add(b)
 	p.SetCreditsDetailed("u1", 350, 350, 0, time.Time{}, 0)
@@ -2100,6 +2101,7 @@ func TestFastGraduateUnprobedTier1(t *testing.T) {
 // 即使繁忙账号已是 Tier 0 免费且未观测账号为 Tier 1。
 func TestPickLeastInFlightFirst(t *testing.T) {
 	p := New("")
+	p.SetRandomSource(func(n int64) int64 { return n - 1 }) // 强制抽签尾部，优先级不能靠概率保证
 	a := &auth.Auth{UID: "busy", Domain: "www.workbuddy.ai"}
 	b := &auth.Auth{UID: "idle", Domain: "www.workbuddy.ai"}
 	p.Add(a)

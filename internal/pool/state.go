@@ -378,6 +378,10 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 func (p *Pool) PickStickyForModel(uid, model, realm string) (*auth.Auth, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.pickStickyLocked(uid, model, realm)
+}
+
+func (p *Pool) pickStickyLocked(uid, model, realm string) (*auth.Auth, bool) {
 	e, ok := p.byUID[uid]
 	if !ok {
 		return nil, true

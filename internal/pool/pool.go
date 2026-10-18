@@ -382,44 +382,29 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 // 名额用 entry.inFlight 原子自增，满额返回 false。上限按账号 realm 分档
 // （global 档 maxInFlightGlobal，P1-1；未设置回落 maxInFlight）。
 func (p *Pool) Acquire(uid string) bool {
-	p.mu.RLock()
-	e, ok := p.byUID[uid]
-	if !ok {
-		p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.byUID[uid]
+	if e == nil || p.inFlightFull(e) {
 		return false
 	}
-	limit := p.inFlightLimit(e)
-	p.mu.RUnlock()
-	if limit <= 0 {
-		// 不限：计数仍累加（供状态观测），但永不拒绝。
-		e.inFlight.Add(1)
-		return true
-	}
-	for {
-		cur := e.inFlight.Load()
-		if cur >= int64(limit) {
-			return false
-		}
-		if e.inFlight.CompareAndSwap(cur, cur+1) {
-			return true
-		}
+	e.inFlight.Add(1)
+	return true
+}
+
+// Release 保留旧 UID API；新请求使用 Lease，避免账号移除再加入后的误释放。
+func (p *Pool) Release(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e := p.byUID[uid]; e != nil {
+		releaseEntry(e)
 	}
 }
 
-// Release 释放一个在途名额。幂等减到 0 为止（防重复释放扣成负数）。
-func (p *Pool) Release(uid string) {
-	p.mu.RLock()
-	e, ok := p.byUID[uid]
-	p.mu.RUnlock()
-	if !ok {
-		return
-	}
+func releaseEntry(e *entry) {
 	for {
-		cur := e.inFlight.Load()
-		if cur <= 0 {
-			return
-		}
-		if e.inFlight.CompareAndSwap(cur, cur-1) {
+		n := e.inFlight.Load()
+		if n <= 0 || e.inFlight.CompareAndSwap(n, n-1) {
 			return
 		}
 	}

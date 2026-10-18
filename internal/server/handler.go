@@ -563,9 +563,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	sessKey := session.ExtractKey(body)
 	stickyUID := ""
 	if h.cfg.Session != nil && sessKey != "" {
-		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
-		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
+		// 只读取已成功建立的绑定；新会话与普通请求共用 Pool 选号策略。
+		if uid, ok := h.cfg.Session.Lookup(sessKey); ok {
 			stickyUID = uid
 		}
 	}
@@ -583,18 +582,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	reqHasImage := hasImagePart(body)
 
 	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
-	var heldUID string
-	defer func() {
-		if heldUID != "" {
-			h.cfg.Pool.Release(heldUID)
-		}
-	}()
+	var held *pool.Lease
 	releaseHeld := func() {
-		if heldUID != "" {
-			h.cfg.Pool.Release(heldUID)
-			heldUID = ""
+		if held != nil {
+			held.Release()
+			held = nil
 		}
 	}
+	defer releaseHeld()
 	// unbindSticky 解绑当前会话粘性号（stickyUID 非空时）。供「粘性号不可用/被抢」与 fail 共用。
 	// 幂等：stickyUID 已空则空操作；不会误解绑其他轮的绑定。仅当 Session != nil 时 stickyUID 才会非空。
 	unbindSticky := func() {
@@ -744,7 +739,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		var acct *auth.Auth
 		if stickyUID != "" {
 			var unbind bool
-			acct, unbind = h.cfg.Pool.PickStickyForModel(stickyUID, bareModel, realm)
+			held, unbind = h.cfg.Pool.PickStickyLease(stickyUID, bareModel, realm)
+			if held != nil {
+				acct = held.Auth
+			}
 			if unbind {
 				// 粘性号在当前模型不可用（冷却/该模型被 6004 限额/积分保底/软限额/无空闲时满载）或 realm 不符 → 解绑，
 				// 本次回落普通轮换。
@@ -760,7 +758,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			held = h.cfg.Pool.PickLease(tried, bareModel, realm)
+			if held != nil {
+				acct = held.Auth
+			}
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -776,21 +777,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
 		tried[acct.UID] = true
-
-		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
-		if !h.cfg.Pool.Acquire(acct.UID) {
-			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
-			// 满载粘性号再浪费一次 PickByUID 往返（语义与 fail()/PickByUID-nil 的解绑一致）。
-			if stickyUID != "" && acct.UID == stickyUID {
-				unbindSticky()
-			}
-			if !rotateBackoff(i, r.Context()) {
-				// 客户端已断连：换号重试无意义，终止轮转走末端错误透传。
-				break
-			}
-			continue // 最后一个名额被并发抢走 → 换号
-		}
-		heldUID = acct.UID
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {

@@ -137,6 +137,22 @@ func (r *Router) Resolve(key string) (string, bool) {
 	return r.ResolveForModel(key, "")
 }
 
+// Lookup 仅查询已有绑定。新会话由 Pool 按统一策略分配，成功后再 Bind。
+// 账号/模型可用性由持租约的 Pool 校验，避免在此提前改绑。
+func (r *Router) Lookup(key string) (string, bool) {
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[key]
+	if !ok || expired(e, now, r.cfg.TTL) {
+		return "", false
+	}
+	e.lastActive = now
+	r.entries[key] = e
+	r.cfg.Store.SetBind(key, e.uid, r.cfg.TTL)
+	return e.uid, true
+}
+
 // ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
 // 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
 // 被该模型限流）走重新分配。

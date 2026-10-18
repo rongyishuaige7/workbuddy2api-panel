@@ -2,11 +2,13 @@ package server
 
 import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNonStreamSSEErrorUsesFailurePolicy(t *testing.T) {
@@ -67,5 +69,29 @@ func TestChannelValidationDoesNotDegrade(t *testing.T) {
 				t.Fatal("channel failure penalized account")
 			}
 		})
+	}
+}
+
+func TestNewSessionUsesPoolPolicy(t *testing.T) {
+	p := pool.New("")
+	p.SetCostExploreInterval(0)
+	for _, u := range []string{"free", "paid"} {
+		p.Add(&auth.Auth{UID: u, AccessToken: "fake-" + u, ExpiresAt: time.Now().Add(time.Hour).Unix()})
+		p.SetCredits(u, 350, 350)
+	}
+	p.NoteModelCost("free", "glm-5.2", 0, 1000)
+	p.NoteModelCost("paid", "glm-5.2", 1, 1000)
+	s := session.New(session.Config{AvailableForModel: func(m string) []string { return p.WeightedAvailableUIDsForModelRealm(m, "cn") }})
+	selected := ""
+	up := newFakeUpstream(t, func(a string) (int, string, bool) { selected = a; return 200, sseOK, true })
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: s})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","conversation_id":"b","messages":[{"role":"user","content":"test"}],"stream":false}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status=%d", w.Code)
+	}
+	if selected != "Bearer fake-free" {
+		t.Fatal("new-session hash allocation bypassed free-account routing policy and selected paid account")
 	}
 }

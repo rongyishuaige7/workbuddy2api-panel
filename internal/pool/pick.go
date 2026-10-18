@@ -45,6 +45,10 @@ func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm stri
 func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.pickLocked(tried, reqModel, realm)
+}
+
+func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	now := time.Now()
 	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
 	healthyOf := func(e *entry) bool { return realmOK(e) && e.healthy(now) }
@@ -75,12 +79,33 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		cands = append(cands, e)
 	}
 
-
-
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
+	}
+	// 优先级先过滤再抽签：排序本身不能阻止低优先级账号被加权随机选中。
+	minFlight := cands[0].inFlight.Load()
+	for _, e := range cands[1:] {
+		if n := e.inFlight.Load(); n < minFlight {
+			minFlight = n
+		}
+	}
+	group := cands[:0]
+	for _, e := range cands {
+		if e.inFlight.Load() == minFlight {
+			group = append(group, e)
+		}
+	}
+	cands = group
+	under := make([]*entry, 0, len(cands))
+	for _, e := range cands {
+		if !p.tokenCeilingReached(e, reqModel, realm) {
+			under = append(under, e)
+		}
+	}
+	if len(under) > 0 {
+		cands = under
 	}
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -163,9 +188,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	ws := make([]weighted, 0, len(cands))
 	for _, e := range cands {
 		ti, ci := costTier(e)
-		// 当存在免费账号 (bestTier == 0) 时，未知账号 (ti == 1) 也允许一同进入候选，
-		// 配合 Least-In-Flight 排序与并发调度，杜绝单号垄断、促进未知号快速毕业。
-		tierEligible := (ti == bestTier) || (bestTier == 0 && ti == 1)
+		tierEligible := ti == bestTier
 		if tierEligible {
 			ws = append(ws, weighted{e: e, w: p.routingWeightOfModel(e, maxCredits, now, reqModel, realm), tier: ti, cost1k: ci})
 		}
@@ -190,23 +213,6 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 	}
 	sort.SliceStable(ws, func(i, j int) bool {
-		// 0. Least in-flight connections first: 空闲账号严格优先 (inFlight == 0 优先于 inFlight > 0)
-		// 优先把请求派发给没有任何在途连接的空闲账号，平摊并发压力，彻底规避单账号并发过高触发上游 WAF 拦截
-		iIF := ws[i].e.inFlight.Load()
-		jIF := ws[j].e.inFlight.Load()
-		if iIF != jIF {
-			return iIF < jIF
-		}
-		// 1. Soft ceiling: 未触及 95% 软限额的账号优先于濒危账号，防止濒危账号被 6004
-		iCeil := p.tokenCeilingReached(ws[i].e, reqModel, realm)
-		jCeil := p.tokenCeilingReached(ws[j].e, reqModel, realm)
-		if iCeil != jCeil {
-			return !iCeil // 未达限额者在前
-		}
-		// 2. costTier 优先级：免费层 (tier 0) 优于 未知层 (tier 1)，未知层优于收费层 (tier 2)
-		if ws[i].tier != ws[j].tier {
-			return ws[i].tier < ws[j].tier
-		}
 		// 3. 收费层：单价低的在前
 		if ws[i].cost1k != ws[j].cost1k {
 			return ws[i].cost1k < ws[j].cost1k
@@ -215,7 +221,10 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if ws[i].w != ws[j].w {
 			return ws[i].w > ws[j].w
 		}
-		return ws[i].e.a.UID < ws[j].e.a.UID // 稳定兜底（洗牌后此项几乎不触发）
+		if len(ws) > 5 {
+			return false
+		} // 保留等权洗牌次序
+		return ws[i].e.a.UID < ws[j].e.a.UID
 	})
 	cands = cands[:0]
 	for _, c := range ws {
