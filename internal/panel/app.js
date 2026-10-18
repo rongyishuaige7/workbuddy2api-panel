@@ -1653,8 +1653,12 @@ $('cfgForm').onsubmit = async ev => {
   btn.disabled = true; btn.textContent = '保存中…';
   try {
     const r = await api('config', { method: 'POST', body: JSON.stringify(collectConfig()) });
-    const n = (r.restart_required || []).length;
-    toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
+    const restart = r.restart_required || [];
+    // 只列真实变化的字段；超过 4 个时截断，避免 toast 铺满整屏。
+    const names = restart.length > 4
+      ? restart.slice(0, 4).join('、') + ' 等 ' + restart.length + ' 项'
+      : restart.join('、');
+    toast(restart.length ? '配置已保存；需重启生效：' + names : '配置已保存并立即生效', 'ok');
     // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
     const k = $('cfgKey').value.trim();
     if (k) localStorage.setItem(LS_KEY, k);

@@ -428,6 +428,12 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err != nil {
 		return nil, fmt.Errorf("read current config: %w", err)
 	}
+	// 旧配置用于判断本次保存到底改了哪些「装配期字段」：只有真实变化才提示重启。
+	// 解析失败（例如旧 prompt.file 已被删除）时 oldCfg 为 nil，退回完整清单。
+	var oldCfg *Config
+	if parsed, perr := ParseConfig(oldRaw); perr == nil {
+		oldCfg = parsed
+	}
 	var cur, incoming map[string]any
 	if err := json.Unmarshal(oldRaw, &cur); err != nil {
 		cur = map[string]any{}
@@ -509,35 +515,85 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
-	return restartRequiredFields(newCfg), nil
+	return restartRequiredFields(oldCfg, newCfg), nil
 }
 
 // restartRequiredFields 返回本次改动中无法热生效、需要重启进程的字段名。
-// 恒返回完整清单中的"与当前进程装配期依赖相关"的项——面板据此提示用户。
-func restartRequiredFields(c *Config) []string {
+//
+// 旧实现恒返回完整清单，导致只改 soft_rate 也会提示「10 项需重启」——用户无法
+// 判断本次保存到底有没有生效。现在只比较 oldCfg 与 newCfg 的装配期字段，返回
+// 真实发生变化的项；oldCfg 为 nil（旧配置无法解析）时退回完整清单。
+//
+// 装配期字段清单（在进程内被监听地址 / HTTP client / 目录句柄 / Handler / Router
+// 等启动期对象捕获，运行期 setter 覆盖不到）：
+//   - listen / auth_dir / state_file
+//   - upstream.*（HTTP client 超时、出站 UA、归属头、device token、IP 透传）
+//   - global.*（auth 开关、上游 base）
+//   - upstash.*（Store 实例）
+//   - session_sticky.enabled / ttl / gc_interval（Router 实例）
+//   - prompt.mode / prompt.file（Handler 构造时读取的提示词文本）
+//   - logging.request_archive_*（Recorder 构造参数）
+//   - server.read_timeout（http.Server 构造参数）
+//
+// 热生效字段（api_key / cooldown.soft_rate / features.sanitize /
+// logging.request_client_info / pool.* / schedule.*）不在本清单内，改了立即生效。
+func restartRequiredFields(oldCfg, newCfg *Config) []string {
+	if newCfg == nil {
+		return nil
+	}
+	if oldCfg == nil {
+		return allRestartRequiredFields()
+	}
 	var out []string
-	// 这些字段在进程内被监听地址/HTTP client/目录句柄等装配期对象捕获。
-	if c.Listen != "" {
-		out = append(out, "listen")
+	add := func(changed bool, name string) {
+		if changed {
+			out = append(out, name)
+		}
 	}
-	if c.AuthDir != "" {
-		out = append(out, "auth_dir")
-	}
-	if c.StateFile != "" {
-		out = append(out, "state_file")
-	}
-	out = append(out, "upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds")
-	// upstream.user_agent 在装配期被写进出站 client（main.go 的 up.UserAgent = ...），
-	// 之后不再读取——不在 livecfg 热快照里，也无法热改。此前漏列，导致面板改完
-	// 显示"已保存"却不提示需要重启，用户以为没生效（issue #102 附带发现 2）。
-	out = append(out, "upstream.user_agent")
-	if c.Upstash.URL != "" || c.Upstash.Token != "" {
-		out = append(out, "upstash")
-	}
-	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
-	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
-	out = append(out, "server.read_timeout")
+	add(oldCfg.Listen != newCfg.Listen, "listen")
+	add(oldCfg.AuthDir != newCfg.AuthDir, "auth_dir")
+	add(oldCfg.StateFile != newCfg.StateFile, "state_file")
+	add(oldCfg.Upstream.TimeoutSeconds != newCfg.Upstream.TimeoutSeconds, "upstream.timeout_seconds")
+	add(oldCfg.Upstream.HeaderTimeoutSeconds != newCfg.Upstream.HeaderTimeoutSeconds, "upstream.header_timeout_seconds")
+	add(oldCfg.Upstream.IdleTimeoutSeconds != newCfg.Upstream.IdleTimeoutSeconds, "upstream.idle_timeout_seconds")
+	add(oldCfg.Upstream.UserAgent != newCfg.Upstream.UserAgent, "upstream.user_agent")
+	add(oldCfg.Upstream.ClientVersion != newCfg.Upstream.ClientVersion, "upstream.client_version")
+	add(oldCfg.Upstream.CliVersion != newCfg.Upstream.CliVersion, "upstream.cli_version")
+	add(oldCfg.Upstream.ClientName != newCfg.Upstream.ClientName, "upstream.client_name")
+	add(oldCfg.Upstream.DeviceToken != newCfg.Upstream.DeviceToken, "upstream.device_token")
+	add(oldCfg.Upstream.DeviceTokenFile != newCfg.Upstream.DeviceTokenFile, "upstream.device_token_file")
+	add(oldCfg.Upstream.PassthroughIP != newCfg.Upstream.PassthroughIP, "upstream.passthrough_ip")
+	add(oldCfg.Global.Enabled != newCfg.Global.Enabled, "global.enabled")
+	add(oldCfg.Global.ChatBase != newCfg.Global.ChatBase, "global.chat_base")
+	add(oldCfg.Global.BillingBase != newCfg.Global.BillingBase, "global.billing_base")
+	add(oldCfg.Upstash.URL != newCfg.Upstash.URL || oldCfg.Upstash.Token != newCfg.Upstash.Token, "upstash")
+	add(oldCfg.SessionSticky.Enabled != newCfg.SessionSticky.Enabled, "session_sticky.enabled")
+	add(oldCfg.SessionSticky.TTL != newCfg.SessionSticky.TTL, "session_sticky.ttl")
+	add(oldCfg.SessionSticky.GCInterval != newCfg.SessionSticky.GCInterval, "session_sticky.gc_interval")
+	add(oldCfg.Prompt.Mode != newCfg.Prompt.Mode, "prompt.mode")
+	add(oldCfg.Prompt.File != newCfg.Prompt.File, "prompt.file")
+	add(oldCfg.Logging.RequestArchiveEnabled != newCfg.Logging.RequestArchiveEnabled, "logging.request_archive_enabled")
+	add(oldCfg.Logging.RequestRetentionDays != newCfg.Logging.RequestRetentionDays, "logging.request_retention_days")
+	add(oldCfg.Logging.RequestArchiveMaxMB != newCfg.Logging.RequestArchiveMaxMB, "logging.request_archive_max_mb")
+	add(oldCfg.Server.ReadTimeout != newCfg.Server.ReadTimeout, "server.read_timeout")
 	return out
+}
+
+// allRestartRequiredFields 是旧配置无法解析时的保守清单：所有装配期字段都提示
+// 需要重启，宁可多提示一次，也不让用户误以为某个字段已经热生效。
+func allRestartRequiredFields() []string {
+	return []string{
+		"listen", "auth_dir", "state_file",
+		"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
+		"upstream.user_agent", "upstream.client_version", "upstream.cli_version", "upstream.client_name",
+		"upstream.device_token", "upstream.device_token_file", "upstream.passthrough_ip",
+		"global.enabled", "global.chat_base", "global.billing_base",
+		"upstash",
+		"session_sticky.enabled", "session_sticky.ttl", "session_sticky.gc_interval",
+		"prompt.mode", "prompt.file",
+		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
+		"server.read_timeout",
+	}
 }
 
 // mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。
