@@ -154,6 +154,9 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			} else {
 				var chunk map[string]any
 				if json.Unmarshal([]byte(payload), &chunk) == nil {
+					if frameErr := FrameError(payload); frameErr != nil {
+						return nil, frameErr
+					}
 					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
 					validEvents++
 					if v, ok := chunk["id"].(string); ok && id == "" {
@@ -689,7 +692,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
 		// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
-		if _, hasErr := obj["error"]; hasErr {
+		if FrameError(payload) != nil {
 			// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
 			if o.onErrorFrame != nil {
 				o.onErrorFrame(payload)

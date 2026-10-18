@@ -40,8 +40,8 @@ func TestClassify(t *testing.T) {
 		// 内容策略拦截（HTTP 400 + 审核文案）：误报信号，不罚账号，走降级重试。
 		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
 		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
-		{400, `{"code":11128,"msg":"request illegal","displayTips":{"zh":"这次调用没通过渠道校验"}}`, ErrContentBlocked},
-		{400, `{"code":11128,"msg":"request illegal"}`, ErrContentBlocked},
+		{400, `{"code":11128,"msg":"request illegal","displayTips":{"zh":"这次调用没通过渠道校验"}}`, ErrChannel},
+		{400, `{"code":11128,"msg":"request illegal"}`, ErrChannel},
 		{400, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
 		{400, `unapproved channel`, ErrContentBlocked},
 		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。

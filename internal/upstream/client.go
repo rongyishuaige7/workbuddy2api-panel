@@ -42,6 +42,7 @@ const (
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrClient                        // 其他 4xx / 业务错误
+	ErrChannel                       // 客户端渠道校验失败；不罚号、不改写提示词
 )
 
 func (k ErrKind) String() string {
@@ -72,6 +73,8 @@ func (k ErrKind) String() string {
 		return "account_fault"
 	case ErrClient:
 		return "client"
+	case ErrChannel:
+		return "channel_validation"
 	default:
 		return "none"
 	}
@@ -489,6 +492,12 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     连环 403。带业务信封的 403 已被上方各层捕获，走不到本层。
 //  11. 内容策略/参数错误/其他 4xx —— 通用兜底。
 func Classify(status int, body string) ErrKind {
+	if status >= 400 && hasBusinessCode(body, "11128") {
+		lower := strings.ToLower(body)
+		if strings.Contains(lower, "channel") || strings.Contains(body, "渠道校验") || strings.Contains(lower, "request illegal") {
+			return ErrChannel
+		}
+	}
 	// 11102「该后端无此模型」须最先判：它是「模型在后端不存在」的确定性答复，语义比
 	// 计费/限流都更具体——若不先判，msg 里的 "service info not found" 会被更宽的
 	// 4xx 兜底归为 ErrClient（只换号不避让），该坏号会留在池内反复被选中。
@@ -754,9 +763,11 @@ const (
 // chatPaths 返回按 realm 的 chat 路径候选序列：
 // global → [/console/chat/completions]
 // （近期上游 workbuddy.ai 在 /v2 启用了渠道校验与客户端完整性风控，针对网页 console
-//  签发的凭证拦截 11128 "没通过渠道校验，可能不是官方客户端发出的"；
-//  而 /console/chat/completions 配合 ensureConsoleSystem 补齐首条 system prompt
-//  后实测 200 流式正常，故 global 切换为 /console/chat/completions 路径）。
+//
+//	签发的凭证拦截 11128 "没通过渠道校验，可能不是官方客户端发出的"；
+//	而 /console/chat/completions 配合 ensureConsoleSystem 补齐首条 system prompt
+//	后实测 200 流式正常，故 global 切换为 /console/chat/completions 路径）。
+//
 // cn → [/v2/chat/completions]（单元素，保持现状）。
 func (c *Client) chatPaths(a *auth.Auth) []string {
 	if c.globalOn(a) {

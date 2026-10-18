@@ -11,6 +11,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -65,6 +66,8 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
 		return "request content was rejected by content policy; adjust the prompt and retry"
+	case ErrChannel:
+		return "upstream rejected the client channel; check account credentials and endpoint configuration"
 	default:
 		// ErrNone/ErrNotFound/ErrServer/ErrBadParams/ErrClient 等未覆盖形态：无 hint。
 		return ""
@@ -99,22 +102,40 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 	}
 }
 
-// FrameKind 从 SSE error 帧 payload 判定 ErrKind：6004 模型级限流的流式形态
-// （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
-// Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
+// FrameKind 返回结构化 SSE 错误的分类；普通数据帧返回 ErrNone。
 func FrameKind(payload string) ErrKind {
+	if err := FrameError(payload); err != nil {
+		return err.Kind
+	}
+	return ErrNone
+}
+
+// FrameError 识别 SSE 业务错误，保留完整信封供分类、冷却和客户端透传共用。
+func FrameError(payload string) *Error {
+	var obj map[string]any
+	if json.Unmarshal([]byte(payload), &obj) != nil {
+		return nil
+	}
+	_, hasError := obj["error"]
+	hasError = hasError && obj["error"] != nil
+	code := strings.TrimSpace(fmt.Sprint(obj["code"]))
+	if !hasError && (code == "<nil>" || code == "" || code == "0") {
+		return nil
+	}
+	kind := Classify(http.StatusBadRequest, payload)
 	if IsModelRateLimit(payload) {
-		return ErrSoftRate
+		kind = ErrSoftRate
 	}
-	var f struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
+	status := http.StatusBadRequest
+	switch kind {
+	case ErrSoftRate:
+		status = http.StatusTooManyRequests
+	case ErrHardCredit:
+		status = http.StatusPaymentRequired
+	case ErrSessionDead:
+		status = http.StatusUnauthorized
 	}
-	if json.Unmarshal([]byte(payload), &f) != nil || f.Error.Message == "" {
-		return ErrNone
-	}
-	return Classify(http.StatusBadRequest, f.Error.Message)
+	return &Error{Kind: kind, Status: status, Msg: payload}
 }
 
 // isModelParamInvalid 上游 11133 body 判定（code 11133 / extError.code=

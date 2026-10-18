@@ -817,6 +817,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
+		var resp map[string]any
+		if terr == nil && status < 400 && !peek.Stream {
+			var aggregateErr error
+			resp, aggregateErr = upstream.Aggregate(rc)
+			rc.Close()
+			if aggregateErr != nil {
+				var frameErr *upstream.Error
+				if errors.As(aggregateErr, &frameErr) {
+					terr = frameErr
+					respBody = []byte(frameErr.Msg)
+				} else {
+					recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+					writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", aggregateErr.Error())
+					st.status = http.StatusBadGateway
+					st.outcome = reqlog.OutcomeHTTPError
+					return
+				}
+			}
+		}
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析）。传输层错误（非 *Error）走抖动换号分支；防御分支
 		// （terr 为 nil 但 status>=400，如 ErrNone 兜底）回落本地 Classify，双保险。
@@ -882,7 +901,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				log.Printf("content-blocked (likely fingerprint false positive) -> degraded prompt retry")
 				continue
 			}
-			if kind == upstream.ErrContentBlocked {
+			if kind == upstream.ErrContentBlocked || kind == upstream.ErrChannel {
 				// 内容命中网关内容防火墙：立即回客户端，**不轮转**——换任何账号都会撞同一
 				// 审核，轮转纯属浪费时间。不罚账号（ErrContentBlocked 分支无冷却/熔断/NoteError）。
 				// error-passthrough：message 装上游 body 原文（code/msg/requestId 原样），
@@ -894,8 +913,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
 					msg = "content blocked by upstream content firewall"
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
-					h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr))
+				code := "content_blocked"
+				if kind == upstream.ErrChannel {
+					code = "channel_validation_failed"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, code, msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
 				return
@@ -1068,16 +1091,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			rc.Close()
-			return
-		}
-		resp, err := upstream.Aggregate(rc)
-		rc.Close()
-		if err != nil {
-			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
-			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
-			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
-			st.status = http.StatusBadGateway
-			st.outcome = reqlog.OutcomeHTTPError
 			return
 		}
 		// 标记修复（非流式）：把正文里的原生工具调用标记还原成 message.tool_calls。
@@ -1402,7 +1415,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)
-	case upstream.ErrContentBlocked:
+	case upstream.ErrContentBlocked, upstream.ErrChannel:
 		// 内容策略拦截（误报）：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
 		// passthrough 模式由 chatCompletions 内降级重试处理；custom 模式本不会到此分支。
 	case upstream.ErrPromptTooLong:
