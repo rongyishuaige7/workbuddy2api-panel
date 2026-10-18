@@ -56,3 +56,4 @@
 - 国际版阶段 1：移除 global 默认额度估计；覆盖高用量稳定会话、新会话候选、显式额度与真实限流避让，CN 软上限回归通过。`go test -race ./internal/pool ./internal/server` 通过。
 - 国际版阶段 2：global 两次 WAF 后可在第三个账号成功（流式/非流式）；全 WAF 仍严格限制最多三次尝试，CN 止损窗口不污染 global。global 明确恢复时间不截短，冷却未到期不能兜底提前重试；CN 既有行为与积分保底的熔断恢复路径回归通过。`go test -race ./internal/pool ./internal/server` 通过。
 - 国际版阶段 3：归档记录有界的逐跳账号/域/路由/HTTP 状态/业务码/Retry-After/耗时/缓存用量，并关联会话哈希与入站字节数。模拟 14003 换号后下一轮保持粘性，嵌套 SSE 6004 保留 HTTP 200 与业务分类；落盘隐私、详情上限与旧归档兼容测试通过。`go test -race ./internal/server ./internal/reqlog` 通过。
+- 国际版最终验证：`go test ./...`、`go test -race ./...`、`go vet ./...` 全部通过；`go build -o <临时目录>/server ./cmd/server` 成功。未替换项目内的 server 二进制，未重启服务，未调用真实账号测活或聊天；线上效果需加载新版本后观察，不能以模拟测试代替生产验证。
