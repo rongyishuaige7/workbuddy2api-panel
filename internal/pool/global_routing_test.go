@@ -78,3 +78,51 @@ func TestGlobalNewSessionDoesNotExcludeHighUsageAccount(t *testing.T) {
 		t.Fatalf("lease=%v: an unverified global quota must not exclude warm", lease)
 	}
 }
+
+func TestGlobalRealCooldownCannotBeBypassedByFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, domain string
+		blocked      bool
+	}{
+		{"global", "www.workbuddy.ai", true},
+		{"cn_unchanged", "www.codebuddy.cn", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New("")
+			p.Add(&auth.Auth{UID: "limited", Domain: tc.domain})
+			p.CooldownSoftRate("limited", time.Minute, time.Time{}, "429 rate limit")
+			lease := p.PickLease(nil, "deepseek-v4.1-flash", "")
+			defer lease.Release()
+			if (lease == nil) != tc.blocked {
+				t.Fatalf("lease=%v blocked=%v", lease, tc.blocked)
+			}
+			if tc.blocked {
+				p.mu.Lock()
+				p.byUID["limited"].until = time.Now().Add(-time.Second)
+				p.mu.Unlock()
+				recovered := p.PickLease(nil, "deepseek-v4.1-flash", "global")
+				defer recovered.Release()
+				if recovered == nil {
+					t.Fatal("account should return after the real cooldown expires")
+				}
+			}
+		})
+	}
+}
+
+func TestGlobalAuthoritativeResetNotTruncated(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "limited", Domain: "www.workbuddy.ai"})
+	p.SetSoftRateMax(time.Minute)
+	reset := time.Now().Add(6 * time.Hour)
+	p.CooldownSoftForModel("limited", time.Minute, reset, "deepseek-v4.1-flash", "6004")
+	st, _ := p.Status("limited")
+	if len(st.RateLimitedModels) != 1 || !st.RateLimitedModels[0].Until.Equal(reset) {
+		t.Fatalf("model cooldown truncated: %+v", st.RateLimitedModels)
+	}
+	p.CooldownSoftRate("limited", time.Minute, reset, "429 rate limit (retry-after)")
+	st, _ = p.Status("limited")
+	if !st.Until.Equal(reset) {
+		t.Fatalf("account cooldown=%v want=%v", st.Until, reset)
+	}
+}

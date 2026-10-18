@@ -332,8 +332,9 @@ func TestCreditFloorBlocksFallbackPath(t *testing.T) {
 	auth.BackfillRealmFor(poor, "global")
 	p.Add(poor)
 	p.SetCredits("poor", 1, 0)
-	// 置入软冷却：让 healthy 候选为空，强制走兜底路径。
-	p.Cooldown("poor", CoolSoft, 2*time.Minute, "test")
+	// 置入熔断：强制走恢复兜底。global 的真实软冷却不允许提前试探。
+	p.SetBreaker(1, 2*time.Minute, 2*time.Minute)
+	p.NoteError("poor")
 
 	if a := p.PickExcludingForRealm(nil, "kimi-k3", "global"); a != nil {
 		t.Fatalf("兜底路径应受保底约束：触底号 credits=1 < floor=150 不得被捞出，got %v", a)
@@ -353,7 +354,8 @@ func TestCreditFloorFallbackAllowsFreeModel(t *testing.T) {
 	auth.BackfillRealmFor(poor, "global")
 	p.Add(poor)
 	p.SetCredits("poor", 1, 0)
-	p.Cooldown("poor", CoolSoft, 2*time.Minute, "test")
+	p.SetBreaker(1, 2*time.Minute, 2*time.Minute)
+	p.NoteError("poor")
 
 	if a := p.PickExcludingForRealm(nil, "hy3", "global"); a == nil {
 		t.Fatal("兜底路径对免费模型应放行触底号，got nil")

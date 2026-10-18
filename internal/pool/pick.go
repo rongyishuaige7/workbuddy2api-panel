@@ -382,6 +382,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
 		}
+		if e.a.IsGlobal() && e.coolKind == CoolSoft && now.Before(e.until) {
+			continue // 国际账号真实 429/WAF 冷却必须到期；兜底不能逐请求重新撞上游
+		}
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
 			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
 		}

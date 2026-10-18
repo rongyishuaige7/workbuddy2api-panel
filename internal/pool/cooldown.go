@@ -155,7 +155,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 				e.modelCooldowns = map[string]modelCooldown{}
 			}
 			e.modelCooldowns[model] = modelCooldown{
-				Until:   p.cappedSoftUntilLocked(now, resetAt),
+				Until:   p.softResetUntilLocked(e, now, resetAt),
 				ResetAt: resetAt,
 				Reason:  reason,
 			}
@@ -361,7 +361,7 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
 		if !resetAt.IsZero() {
-			e.until = p.cappedSoftUntilLocked(now, resetAt)
+			e.until = p.softResetUntilLocked(e, now, resetAt)
 		} else if e.coolKind != CoolSoft || !now.Before(e.until) {
 			// 新限流（不在有效软冷却中）：推进有界退避；兜底探测（仍在软冷却中）不翻倍。
 			d := p.softDurationLocked(base, e.softStreak+1)
@@ -372,6 +372,15 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 		e.reason = reason
 		p.dirty.Store(true)
 	}
+}
+
+// softResetUntilLocked 国际版尊重明确的恢复时间（含 Retry-After），不能将
+// 未知限流的退避封顶误用为提前放行时间。CN 保留既有策略。
+func (p *Pool) softResetUntilLocked(e *entry, now, resetAt time.Time) time.Time {
+	if e.a.IsGlobal() && resetAt.After(now) {
+		return resetAt
+	}
+	return p.cappedSoftUntilLocked(now, resetAt)
 }
 
 // cappedSoftUntilLocked 把上游重置墙钟截断到 softRateMax（now+softRateMax 与 resetAt

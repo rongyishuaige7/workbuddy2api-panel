@@ -115,7 +115,7 @@ type Handler struct {
 	cfg     Config
 	mux     *http.ServeMux
 	degrade degradeGate
-	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
+	// wafIP CN WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
 }
@@ -553,6 +553,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	var lastRealm string
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
 	var modelBlock pool.ModelBlockStatus
@@ -778,6 +779,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
+		lastRealm = acct.Realm()
 		tried[acct.UID] = true
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
@@ -964,11 +966,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
-			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
-			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
-			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
-			// 加重风控。账号级软冷却已在上方 applyErrorPolicy 照常记账。
-			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
+			// CN 保留原有短窗止损。global 现场存在多号 WAF 与成功调用并存，
+			// 不能据此宣布整 IP 不可用：只冷却失败账号，在 MaxRotate 内有限迁移。
+			// global 失败不污染 CN 的止损窗口。
+			if kind == upstream.ErrWafBlock && lastRealm != "global" && h.wafIP.noteWaf(acct.UID) {
 				break
 			}
 			if !rotateBackoff(i, r.Context()) {
@@ -1151,7 +1152,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
 		case upstream.ErrWafBlock:
-			if h.wafIP.active() {
+			if lastRealm == "global" {
+				code = "waf_blocked"
+			} else if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
 				// 轮转已止损、窗口过后自动解除。客户端提前重试无意义（换号不换 IP）；
 				// 有上游原文时原文优先（下方统一）。

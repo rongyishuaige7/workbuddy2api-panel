@@ -54,3 +54,4 @@
 每阶段使用模拟上游验证 global 故障迁移、稳定绑定和 CN 回归，分别提交并推送。最终执行全量 test、race、vet 和构建校验；构建写临时目录，不替换当前 server。
 
 - 国际版阶段 1：移除 global 默认额度估计；覆盖高用量稳定会话、新会话候选、显式额度与真实限流避让，CN 软上限回归通过。`go test -race ./internal/pool ./internal/server` 通过。
+- 国际版阶段 2：global 两次 WAF 后可在第三个账号成功（流式/非流式）；全 WAF 仍严格限制最多三次尝试，CN 止损窗口不污染 global。global 明确恢复时间不截短，冷却未到期不能兜底提前重试；CN 既有行为与积分保底的熔断恢复路径回归通过。`go test -race ./internal/pool ./internal/server` 通过。

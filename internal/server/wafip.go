@@ -1,4 +1,5 @@
-// wafip.go WAF IP 级拦截 fail-fast 状态机（任务书 waf-ip-failfast）。
+// wafip.go CN WAF 短窗止损状态机。global 不使用此 IP 推断：现场多个账号
+// WAF 与成功调用并存，global 仅按账号冷却并在 MaxRotate 内有限迁移。
 //
 // 背景（fork-scan-absorb T-1 / BulidH 实测）：WAF 403 拦的是网关出口 IP 而非
 // 账号——3 个账号 1 秒内全 403。既有 ErrWafBlock 账号级软冷却（wafCooldownBase
