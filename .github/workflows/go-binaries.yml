@@ -34,6 +34,19 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: gofmt
+        run: |
+          fmt=$(gofmt -l cmd internal)
+          if [ -n "$fmt" ]; then
+            echo "::error::gofmt required for:"
+            echo "$fmt"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      # 核心并发路径的竞态门禁（全量 race 在本地/发布前另行执行，CI 控制时长）
+      - name: race (core packages)
+        run: go test -race ./internal/pool ./internal/server ./internal/session ./internal/upstream ./internal/usage ./internal/reqlog
       # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
       - run: go test ./...
 

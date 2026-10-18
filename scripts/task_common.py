@@ -12,7 +12,9 @@
 """
 import json, os, time, glob, urllib.request, urllib.error
 
-AUTHS = "/root/workbuddy2api/auths"
+# 凭证目录：默认兼容历史部署路径；Docker 容器内请设 WB2A_AUTH_DIR=/app/auths。
+# 与网关 config.auth_dir 同源。
+AUTHS = os.environ.get("WB2A_AUTH_DIR", "/root/workbuddy2api/auths")
 CHAT_BASE = "https://copilot.tencent.com"   # growth / tasks / buddy / streak / chat
 BILL_BASE = "https://www.codebuddy.cn"      # report / billing
 

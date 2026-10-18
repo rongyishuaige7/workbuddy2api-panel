@@ -11,6 +11,7 @@
   python3 probe_active.py report 0225284f
   python3 probe_active.py unlock 0225284f --yes
   python3 probe_active.py report ALL --yes --gap 1.05   # 全池
+  python3 probe_active.py probe 00e26541 --auths /app/auths   # Docker 容器内
 
 注意
   - 默认 dry-run：写动作必须显式加 --yes
@@ -19,7 +20,9 @@
 """
 import json, os, sys, time, glob, argparse, urllib.request, urllib.error
 
-AUTHS = "/root/workbuddy2api/auths"
+# 凭证目录：默认兼容历史部署路径；Docker 容器内请设 WB2A_AUTH_DIR=/app/auths
+# 或传 --auths /app/auths。与网关 config.auth_dir 同源。
+AUTHS = os.environ.get("WB2A_AUTH_DIR", "/root/workbuddy2api/auths")
 CHAT_BASE = "https://copilot.tencent.com"   # growth / report
 BILL_BASE = "https://www.codebuddy.cn"      # billing / report
 
@@ -94,12 +97,16 @@ def unlock(c, n_reports=6):
     return bf
 
 def main():
+    global AUTHS
     ap = argparse.ArgumentParser()
     ap.add_argument("action", choices=["probe", "report", "unlock"])
     ap.add_argument("account", help="uid 前缀，或 ALL")
     ap.add_argument("--yes", action="store_true", help="确认执行写操作")
     ap.add_argument("--gap", type=float, default=1.05)
+    ap.add_argument("--auths", default=AUTHS,
+                    help="auths 目录（默认 $WB2A_AUTH_DIR 或 /root/workbuddy2api/auths）")
     a = ap.parse_args()
+    AUTHS = os.path.abspath(os.path.expanduser(a.auths))
 
     if a.account.upper() == "ALL":
         prefixes = [os.path.basename(p)[10:18]

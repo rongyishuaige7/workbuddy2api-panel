@@ -10,6 +10,8 @@
 #   3. 回到这里按 y → poll 拿 token+uid+nickname → 签到 → 落盘 auths/workbuddy-<uid>.json
 #   4. 重启 workbuddy2api 容器加载新账号
 set -euo pipefail
+# 凭证文件含明文 token：本脚本创建的文件一律 0600（mkdir 得到 0700）。
+umask 077
 
 cd "$(dirname "$0")"
 AUTH_DIR="./auths"
@@ -69,6 +71,13 @@ NICKNAME=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.std
 
 if [[ -z "$USER_ID" ]]; then
     echo "无法获取 uid，请检查 token 是否有效"
+    exit 1
+fi
+
+# uid 来自上游响应，未经校验就拼文件名会被路径穿越利用
+# （与 panel login / cockpit import 的 validUID 同口径：仅字母数字下划线连字符，≤64）。
+if [[ ! "$USER_ID" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+    echo "上游返回的 uid 含非法字符，拒绝落盘（防路径穿越）"
     exit 1
 fi
 
@@ -157,6 +166,8 @@ with open(os.environ["WB2A_LOGIN_AUTH_FILE"], "w") as f:
     json.dump(auth, f, indent=1)
 print(f"已保存（{os.environ['WB2A_LOGIN_ACTION']}）: {os.environ['WB2A_LOGIN_AUTH_FILE']}")
 PYEOF
+# 双保险：即使调用方 umask 异常，凭证文件也必须是 0600。
+chmod 600 "$AUTH_FILE"
 
 # ─── 重启服务 ────────────────────────────────────────────
 echo ""
@@ -177,6 +188,6 @@ echo "============================================================"
 echo "  登录完成！"
 echo "  UID: $USER_ID"
 echo "  Nickname: ${NICKNAME:-（未获取到）}"
-echo "  Token: ${TOKEN:0:30}..."
+echo "  Token: [已隐藏，凭证已写入 $AUTH_FILE]"
 echo "  有效期: $(date -d "@$EXPIRES_AT" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$EXPIRES_AT")"
 echo "============================================================"
