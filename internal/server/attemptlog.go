@@ -40,12 +40,33 @@ func noteAttemptError(a *reqlog.Attempt, err error, body string) {
 		if body == "" {
 			body = ue.Msg
 		}
+		if ue.Kind == upstream.ErrSoftRate || ue.Kind == upstream.ErrWafBlock {
+			_, resetKnown := upstream.ParseRateReset(body)
+			switch {
+			case resetKnown && ue.Kind == upstream.ErrSoftRate:
+				a.CooldownSource = "upstream_reset"
+			case ue.RetryAfter > 0:
+				a.CooldownSource = "upstream_retry_after"
+			case ue.Kind == upstream.ErrWafBlock:
+				a.CooldownSource = "local_waf_backoff"
+			default:
+				a.CooldownSource = "local_rate_backoff"
+			}
+		}
 	} else if err != nil {
 		a.ErrorKind = "transport_error"
 	} else if a.UpstreamStatus >= 400 {
 		a.ErrorKind = upstream.Classify(a.UpstreamStatus, body).String()
 	}
 	a.BusinessCode, a.UpstreamRequestID = errorDiagnosticIDs(body)
+	if a.UpstreamRequestID == "" && a.ResponseTrace != nil {
+		for _, name := range []string{"x-request-id", "x-apisix-request-id", "x-trace-id", "x-tc-requestid", "body-request-id"} {
+			if id := a.ResponseTrace.RequestIDs[name]; id != "" {
+				a.UpstreamRequestID = id
+				break
+			}
+		}
+	}
 }
 
 // 仅允许数值业务码与 hex/UUID 请求 ID。嵌套 message JSON 最多展开四层；

@@ -15,6 +15,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 func TestGlobalAttemptArchiveRecordsRateLimitMigration(t *testing.T) {
@@ -89,6 +90,30 @@ func TestGlobalAttemptArchiveRecordsRateLimitMigration(t *testing.T) {
 	var archived reqlog.Event
 	if err := json.Unmarshal([]byte(strings.SplitN(string(raw), "\n", 2)[0]), &archived); err != nil || len(archived.AttemptDetails) != 2 {
 		t.Fatalf("archive did not preserve migration diagnostics: %+v err=%v", archived, err)
+	}
+}
+
+func TestAttemptDistinguishesAuthoritativeCooldownFromEstimate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		kind  upstream.ErrKind
+		body  string
+		retry time.Duration
+		want  string
+	}{
+		{"unknown_14003", upstream.ErrSoftRate, `{"code":14003,"msg":"too many requests"}`, 0, "local_rate_backoff"},
+		{"waf_no_deadline", upstream.ErrWafBlock, wafPage, 0, "local_waf_backoff"},
+		{"retry_after", upstream.ErrSoftRate, `{"code":14003}`, time.Minute, "upstream_retry_after"},
+		{"waf_retry_after", upstream.ErrWafBlock, wafPage, time.Minute, "upstream_retry_after"},
+		{"reset_time", upstream.ErrSoftRate, `{"code":6004,"msg":"will reset at 2099-10-18 12:00:00 UTC+8"}`, 0, "upstream_reset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := reqlog.Attempt{}
+			noteAttemptError(&a, &upstream.Error{Kind: tc.kind, RetryAfter: tc.retry, Msg: tc.body}, tc.body)
+			if a.CooldownSource != tc.want {
+				t.Fatalf("source=%q want=%q", a.CooldownSource, tc.want)
+			}
+		})
 	}
 }
 

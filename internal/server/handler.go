@@ -117,7 +117,8 @@ type Handler struct {
 	degrade degradeGate
 	// wafIP CN WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
-	wafIP wafIPGate
+	wafIP       wafIPGate
+	diagnostics *requestDiagnostics
 }
 
 // NewHandler 构建 handler。
@@ -135,6 +136,9 @@ func NewHandler(cfg Config) *Handler {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	if cfg.RequestLog != nil {
+		h.diagnostics = newRequestDiagnostics()
+	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -545,6 +549,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	st := newChatStat(time.Now(), body, peek.Stream)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
+		st.requestID = tr.id
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
 		// 让 stdout 流水行与归档事件共用同一份来源值，两处不会漂移。
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
@@ -563,6 +568,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
 	st.sessionHash = sessionHash(sessKey)
+	snapshot := h.diagnostics.snapshot(body, st.requestID, st.start)
+	if snapshot != nil {
+		st.requestShape = &snapshot.shape
+		diagnosticKey := st.sessionHash + "|" + peek.Model
+		if st.sessionHash == "" {
+			diagnosticKey = ""
+		}
+		st.requestDiff = h.diagnostics.compare(diagnosticKey, snapshot)
+		defer func() {
+			if st.outcome == reqlog.OutcomeSuccess {
+				h.diagnostics.success(diagnosticKey, snapshot)
+			}
+		}()
+	}
 	stickyUID := ""
 	temporaryOffload := false
 	if h.cfg.Session != nil && sessKey != "" {
@@ -612,6 +631,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 显式入参而不是读 st.ttfb：后者在流式分支里是**调用之后**才赋值的，
 	// 靠顺序传递会让将来重排代码时静默把速率算回旧的错口径。
 	var attempt reqlog.Attempt
+	observeResponse := func(outbound []byte, trace upstream.ResponseTrace) {
+		attempt.ResponseTrace = &reqlog.ResponseTrace{OutboundBytes: len(outbound),
+			ContentType: trace.ContentType, BodyKind: trace.BodyKind,
+			RequestIDs: trace.RequestIDs, RetryAfter: trace.RetryAfter,
+			RetryAfterHeaderPresent: trace.RetryAfterHeaderPresent}
+		if h.diagnostics != nil {
+			attempt.ResponseTrace.OutboundFingerprint = h.diagnostics.fingerprint(outbound)
+		}
+	}
 	recordAttempt := func(uid string, delta pool.TokenUsageDelta, credit float64, hasCredit bool, started time.Time, ttfb time.Duration) {
 		st.attempts++
 		if delta.HasPromptTokens {
@@ -724,6 +752,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		convID = sessKey
 	}
 	chatMeta := upstream.ChatMeta{ConversationID: convID}
+	if h.diagnostics != nil {
+		chatMeta.ObserveResponse = observeResponse
+	}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {

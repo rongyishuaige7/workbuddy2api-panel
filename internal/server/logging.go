@@ -56,6 +56,8 @@ type chatStat struct {
 	attempts         int
 	sessionHash      string
 	requestBytes     int
+	requestShape     *reqlog.RequestShape
+	requestDiff      *reqlog.RequestComparison
 	attemptDetails   []reqlog.Attempt
 	credit           float64
 	hasCredit        bool
@@ -420,6 +422,8 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.Attempts = s.attempts
 		e.SessionHash = s.sessionHash
 		e.RequestBytes = s.requestBytes
+		e.RequestShape = s.requestShape
+		e.RequestDiff = s.requestDiff
 		e.AttemptDetails = s.attemptDetails
 		e.PromptTokens = s.promptTokens
 		e.CompletionTokens = s.completionTokens
