@@ -5,6 +5,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestPickLeaseConcurrentCapacity(t *testing.T) {
@@ -86,5 +87,23 @@ func TestIdlePaidAccountPrecedesBusyFreeAccount(t *testing.T) {
 	defer picked.Release()
 	if picked.Auth.UID != "idle" {
 		t.Fatal("cost filtering defeated idle priority")
+	}
+}
+
+func TestPickQueriesUsageOncePerCandidate(t *testing.T) {
+	p := New("")
+	calls := map[string]int{}
+	for i := 0; i < 10; i++ {
+		p.Add(&auth.Auth{UID: fmt.Sprint(i)})
+	}
+	p.SetTokenUsageOf(func(u, m string, w time.Duration) int64 { calls[u]++; return 10 })
+	p.PickExcludingForRealm(nil, "deepseek-v4.1-flash", "cn")
+	if len(calls) != 10 {
+		t.Fatalf("queried %d accounts", len(calls))
+	}
+	for _, n := range calls {
+		if n != 1 {
+			t.Fatalf("usage queried %d times for a candidate", n)
+		}
 	}
 }

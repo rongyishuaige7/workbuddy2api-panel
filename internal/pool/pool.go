@@ -56,7 +56,7 @@ type Pool struct {
 	// 仅在持 p.mu 时由 floorBlockedForModel 调用；回调不得反向调用 Pool 方法。
 	modelRateOf func(realm, model string) string
 	// tokenUsageOf 查账号在指定时间窗口内（如 24 小时）对指定模型的累计已用 Token 数。
-	// 由 main 用 usage.Recorder.TokensInWindow 注入。
+	// 由 main 用 usage.Recorder.QuotaTokensToday 注入；window 为兼容旧回调保留。
 	tokenUsageOf func(uid, model string, window time.Duration) int64
 	// tokenCeilingOf 查 (realm, 模型) 的单日 Token 安全上限（0 = 不设上限/未知）。
 	// nil 时使用 defaultTokenCeiling。
@@ -245,7 +245,7 @@ func (p *Pool) SetModelRateOf(fn func(realm, model string) string) {
 	p.modelRateOf = fn
 }
 
-// SetTokenUsageOf 注入按窗口查询账号累计 Token 消耗的回调（main 用 usage.Recorder.TokensInWindow 装配）。
+// SetTokenUsageOf 注入按窗口查询账号累计 Token 消耗的回调（main 用 usage.Recorder.QuotaTokensToday 装配）。
 // 用于 Token 维度的平摊加权与主动软避障（Soft Ceiling）。
 func (p *Pool) SetTokenUsageOf(fn func(uid, model string, window time.Duration) int64) {
 	p.mu.Lock()
@@ -282,7 +282,7 @@ func defaultTokenCeiling(realm, model string) int64 {
 	return 0
 }
 
-// tokenCeilingReached 检查账号在过去 24 小时内对该模型的消耗是否达到软上限（95%），避免触发 6004。
+// tokenCeilingReached 检查账号在当前配额周期内对该模型的消耗是否达到软上限（95%），避免触发 6004。
 func (p *Pool) tokenCeilingReached(e *entry, model, realm string) bool {
 	if p.tokenUsageOf == nil || model == "" || e == nil {
 		return false

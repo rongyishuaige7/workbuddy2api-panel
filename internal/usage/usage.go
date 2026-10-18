@@ -79,11 +79,12 @@ type file struct {
 
 // Recorder 并发安全的用量记录器。
 type Recorder struct {
-	mu      sync.Mutex
-	path    string
-	buckets map[string]*bucket // key: scope|realm|uid|model|rate
-	dirty   bool
-	started time.Time
+	mu        sync.Mutex
+	path      string
+	buckets   map[string]*bucket            // key: scope|realm|uid|model|rate
+	quotaDays map[string]map[quotaKey]int64 // 调度专用自然日索引，独立于历史展示
+	dirty     bool
+	started   time.Time
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -93,11 +94,12 @@ type Recorder struct {
 // New 创建记录器。path 为空时禁用落盘（纯内存，测试用）。
 func New(path string) *Recorder {
 	r := &Recorder{
-		path:    path,
-		buckets: make(map[string]*bucket),
-		started: time.Now(),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		path:      path,
+		buckets:   make(map[string]*bucket),
+		quotaDays: make(map[string]map[quotaKey]int64),
+		started:   time.Now(),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 	if path != "" {
 		if err := r.load(); err != nil {
@@ -149,13 +151,13 @@ type Delta struct {
 	HasCredit        bool
 	ModelRate        string
 	// CacheHitTokens / CacheMissTokens 前缀缓存命中/未命中观测（issue #92）。
-	HasCacheTokens   bool
-	CacheHitTokens   int64
-	CacheMissTokens  int64
-	LatencyMs        int64
-	HasLatency       bool
-	TokensPerSecond  float64
-	HasTPS           bool
+	HasCacheTokens  bool
+	CacheHitTokens  int64
+	CacheMissTokens int64
+	LatencyMs       int64
+	HasLatency      bool
+	TokensPerSecond float64
+	HasTPS          bool
 }
 
 // Add 记录一次请求尝试。
@@ -193,12 +195,16 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	if d.HasCompletion {
 		b.CT += d.CompletionTokens
 	}
+	var quotaTokens int64
 	if d.HasTotal {
+		quotaTokens = d.TotalTokens
 		b.TT += d.TotalTokens
 	} else if d.HasPromptTokens || d.HasCompletion {
 		// 上游没给 total：用 pt+ct 兜底，保证总量口径连续。
 		b.TT += d.PromptTokens + d.CompletionTokens
+		quotaTokens = d.PromptTokens + d.CompletionTokens
 	}
+	r.addQuotaLocked(now, uid, model, quotaTokens)
 	if d.HasCredit {
 		b.CR += d.Credit
 		b.CRN++
@@ -253,7 +259,7 @@ func (r *Recorder) TokensInWindow(uid, model string, window time.Duration) int64
 }
 
 // TokensToday 返回指定账号在当天（本地自然日 00:00:00 至今）对指定模型的累计消耗 TotalTokens。
-// 上游如 DeepSeek 等日限额按自然日（00:00:00）重置，故用于安全限额与配额均衡时应使用本方法，避免误算昨天历史用量。
+// 仅供本地日历展示/兼容；调度使用 QuotaTokensToday 的 UTC+8 周期与索引。
 func (r *Recorder) TokensToday(uid, model string) int64 {
 	if r == nil || uid == "" || model == "" {
 		return 0
@@ -353,6 +359,7 @@ func (r *Recorder) load() error {
 		b := f.Buckets[i]
 		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model+"|"+b.Rate] = &b
 	}
+	r.rebuildQuotaLocked()
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil
 }

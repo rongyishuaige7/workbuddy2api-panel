@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
 // 本文件为 P 组性能审查的量化基准（go test -bench 可复现），结论见 REVIEW-conflicts-perf.md。
@@ -81,5 +82,24 @@ func BenchmarkGoroutineSpawn(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		go func() { _ = 1 }()
+	}
+}
+
+// 调度不得随永久保留的历史桶数量线性退化。
+func BenchmarkPickWithQuotaHistory(b *testing.B) {
+	for _, n := range []int{0, 10_000, 50_000} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			p := benchPool(b)
+			r := usage.New("")
+			now := time.Now()
+			for i := 0; i < n; i++ {
+				r.Add(now.Add(-time.Duration(i/46)*time.Hour), "cn", fmt.Sprintf("u%02d", i%46), "deepseek-v4.1-flash", usage.Delta{HasTotal: true, TotalTokens: 100}, true)
+			}
+			p.SetTokenUsageOf(func(u, m string, _ time.Duration) int64 { return r.QuotaTokensToday(u, m) })
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				p.PickExcludingForRealm(nil, "deepseek-v4.1-flash", "cn")
+			}
+		})
 	}
 }

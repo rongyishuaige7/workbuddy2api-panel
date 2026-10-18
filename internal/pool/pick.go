@@ -84,6 +84,19 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
 	}
+	// 每候选只查询一次配额，过滤与抽签复用同一快照。
+	usedTokens := make(map[*entry]int64, len(cands))
+	ceilings := make(map[*entry]int64, len(cands))
+	for _, e := range cands {
+		r := realm
+		if r == "" {
+			r = e.a.Realm()
+		}
+		ceilings[e] = p.effectiveTokenCeiling(r, reqModel)
+		if p.tokenUsageOf != nil && reqModel != "" {
+			usedTokens[e] = p.tokenUsageOf(e.a.UID, reqModel, 24*time.Hour)
+		}
+	}
 	// 优先级先过滤再抽签：排序本身不能阻止低优先级账号被加权随机选中。
 	minFlight := cands[0].inFlight.Load()
 	for _, e := range cands[1:] {
@@ -100,7 +113,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 	cands = group
 	under := make([]*entry, 0, len(cands))
 	for _, e := range cands {
-		if !p.tokenCeilingReached(e, reqModel, realm) {
+		if ceilings[e] <= 0 || usedTokens[e] < int64(float64(ceilings[e])*0.95) {
 			under = append(under, e)
 		}
 	}
@@ -125,7 +138,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 	// 若已知收费的号恒压过未知号，那台免费的号永远轮不到，也就永远学不到。
 	// 为什么用硬过滤而非仅排序：pickWeighted 会在候选内加权随机，只排序的话
 	// 收费号仍有机会抽中，达不到"优先免费"的语义。
-	costTier := func(e *entry) (int, float64) {
+	lookupCostTier := func(e *entry) (int, float64) {
 		mc, ok := e.modelCostOf(reqModel, now)
 		if !ok {
 			return 1, 0
@@ -135,6 +148,16 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 		}
 		return 2, mc.CostPer1k
 	}
+	type cost struct {
+		tier  int
+		price float64
+	}
+	costs := make(map[*entry]cost, len(cands))
+	for _, e := range cands {
+		ti, ci := lookupCostTier(e)
+		costs[e] = cost{ti, ci}
+	}
+	costTier := func(e *entry) (int, float64) { c := costs[e]; return c.tier, c.price }
 	bestTier := 2
 	hasTier1 := false
 	explored := false // 本次 pick 是否切了探索层（事件日志在选中号确定后打）
@@ -186,11 +209,17 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 		cost1k float64
 	}
 	ws := make([]weighted, 0, len(cands))
+	cachedWeights := make(map[*entry]float64, len(cands))
 	for _, e := range cands {
 		ti, ci := costTier(e)
 		tierEligible := ti == bestTier
 		if tierEligible {
-			ws = append(ws, weighted{e: e, w: p.routingWeightOfModel(e, maxCredits, now, reqModel, realm), tier: ti, cost1k: ci})
+			w := p.weightOfModelUsage(e, maxCredits, now, usedTokens[e], ceilings[e])
+			if p.preferExpiring && expiringNow(e, now) {
+				w *= expiringVirtualSlots
+			}
+			cachedWeights[e] = w
+			ws = append(ws, weighted{e: e, w: w, tier: ti, cost1k: ci})
 		}
 	}
 	// 等权重洗牌：仅当存在权重相等且候选数超过 top5 时，才对 ws 做 Fisher-Yates
@@ -259,7 +288,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string) *auth.A
 			}
 		}
 	} else {
-		e = p.pickWeighted(eligible, reqModel, realm) // eligible 保序 = top5 降序子集
+		e = p.pickWeighted(eligible, cachedWeights) // eligible 保序 = top5 降序子集
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -402,19 +431,12 @@ var minPickGap = 100 * time.Millisecond
 // credits 全 0 时仍按 idleWeight 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
 // 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
-func (p *Pool) pickWeighted(cands []*entry, model, realm string) *entry {
-	now := time.Now()
-	var maxCredits int64
-	for _, e := range cands {
-		if e.credits > maxCredits {
-			maxCredits = e.credits
-		}
-	}
+func (p *Pool) pickWeighted(cands []*entry, cached map[*entry]float64) *entry {
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
 	var total int64
 	for i, e := range cands {
-		w := p.routingWeightOfModel(e, maxCredits, now, model, realm)
+		w := cached[e]
 		weights[i] = int64(w * scale)
 		total += weights[i]
 	}
@@ -443,6 +465,14 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 
 // weightOfModel 计算带模型 Token 消耗平摊因子的普通加权分值。
 func (p *Pool) weightOfModel(e *entry, maxCredits int64, now time.Time, model, realm string) float64 {
+	var used int64
+	if p.tokenUsageOf != nil && model != "" {
+		used = p.tokenUsageOf(e.a.UID, model, 24*time.Hour)
+	}
+	return p.weightOfModelUsage(e, maxCredits, now, used, p.effectiveTokenCeiling(realm, model))
+}
+
+func (p *Pool) weightOfModelUsage(e *entry, maxCredits int64, now time.Time, used, ceiling int64) float64 {
 	w := 1.0
 	// 1. credits 比例 ×10（会计入 mid-credit 锚点，避免全员 0 时 credits 项为 0）。
 	if maxCredits > 0 {
@@ -462,22 +492,18 @@ func (p *Pool) weightOfModel(e *entry, maxCredits int64, now time.Time, model, r
 		}
 		w += idleW
 	}
-	// 3. Token 消耗平摊惩罚因子：当存在 24h Token 统计时，已消耗越多，权重越低，实现多号动态平摊
-	if p.tokenUsageOf != nil && model != "" {
-		used := p.tokenUsageOf(e.a.UID, model, 24*time.Hour)
-		ceiling := p.effectiveTokenCeiling(realm, model)
-		if ceiling > 0 && used > 0 {
-			ratio := float64(used) / float64(ceiling)
-			if ratio > 1.0 {
-				ratio = 1.0
-			}
-			// 线性平滑压低：0% 使用 -> 1.0; 50% 使用 -> 0.55; 90% 使用 -> 0.19; 封底 0.05
-			factor := 1.0 - 0.9*ratio
-			if factor < 0.05 {
-				factor = 0.05
-			}
-			w *= factor
+	// 3. 周期内 Token 消耗越多，权重越低。
+	if ceiling > 0 && used > 0 {
+		ratio := float64(used) / float64(ceiling)
+		if ratio > 1.0 {
+			ratio = 1.0
 		}
+		// 线性平滑压低：0% 使用 -> 1.0; 50% 使用 -> 0.55; 90% 使用 -> 0.19; 封底 0.05
+		factor := 1.0 - 0.9*ratio
+		if factor < 0.05 {
+			factor = 0.05
+		}
+		w *= factor
 	}
 	// 4. 在途请求惩罚：已有在途请求时动态降低权重，推动并发请求向空闲账号倾斜
 	if inflight := e.inFlight.Load(); inflight > 0 {
