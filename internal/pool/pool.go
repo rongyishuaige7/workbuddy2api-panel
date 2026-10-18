@@ -315,7 +315,7 @@ func (p *Pool) hasOtherUnderCeilingAccount(excludeUID, model, realm string) bool
 	return false
 }
 
-// hasOtherIdleAccount 检查池内是否存在除 excludeUID 以外、其他健康、非触底、未达限额且当前完全空闲 (inFlight == 0) 的候选账号。
+// hasOtherIdleAccount 检查池内是否存在除 excludeUID 以外、其他健康、非触底且当前完全空闲 (inFlight == 0) 的候选账号。
 // 必须在持 p.mu 锁下调用。
 func (p *Pool) hasOtherIdleAccount(excludeUID, model, realm string) bool {
 	now := time.Now()
@@ -330,9 +330,6 @@ func (p *Pool) hasOtherIdleAccount(excludeUID, model, realm string) bool {
 			continue
 		}
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
-			continue
-		}
-		if p.tokenCeilingReached(e, model, realm) {
 			continue
 		}
 		if e.inFlight.Load() == 0 {

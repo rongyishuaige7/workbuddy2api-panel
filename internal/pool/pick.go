@@ -75,27 +75,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		cands = append(cands, e)
 	}
 
-	// 主动软避障（Soft Ceiling Protection）：
-	// 如果存在未触及 95% 软限额的候选账号，则将濒危账号排除，避免其被上游 6004 硬锁 24 小时；
-	// 若池内所有候选账号均已触顶，则保留全员兜底服务（避免提前 503）。
-	if len(cands) > 1 && reqModel != "" {
-		hasUnderCeiling := false
-		for _, e := range cands {
-			if !p.tokenCeilingReached(e, reqModel, realm) {
-				hasUnderCeiling = true
-				break
-			}
-		}
-		if hasUnderCeiling {
-			filtered := make([]*entry, 0, len(cands))
-			for _, e := range cands {
-				if !p.tokenCeilingReached(e, reqModel, realm) {
-					filtered = append(filtered, e)
-				}
-			}
-			cands = filtered
-		}
-	}
+
 
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
@@ -217,15 +197,21 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if iIF != jIF {
 			return iIF < jIF
 		}
-		// 1. costTier 优先级：免费层 (tier 0) 优于 未知层 (tier 1)，未知层优于收费层 (tier 2)
+		// 1. Soft ceiling: 未触及 95% 软限额的账号优先于濒危账号，防止濒危账号被 6004
+		iCeil := p.tokenCeilingReached(ws[i].e, reqModel, realm)
+		jCeil := p.tokenCeilingReached(ws[j].e, reqModel, realm)
+		if iCeil != jCeil {
+			return !iCeil // 未达限额者在前
+		}
+		// 2. costTier 优先级：免费层 (tier 0) 优于 未知层 (tier 1)，未知层优于收费层 (tier 2)
 		if ws[i].tier != ws[j].tier {
 			return ws[i].tier < ws[j].tier
 		}
-		// 2. 收费层：单价低的在前
+		// 3. 收费层：单价低的在前
 		if ws[i].cost1k != ws[j].cost1k {
 			return ws[i].cost1k < ws[j].cost1k
 		}
-		// 3. 权重高者在前
+		// 4. 权重高者在前
 		if ws[i].w != ws[j].w {
 			return ws[i].w > ws[j].w
 		}

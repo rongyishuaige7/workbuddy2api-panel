@@ -252,6 +252,30 @@ func (r *Recorder) TokensInWindow(uid, model string, window time.Duration) int64
 	return total
 }
 
+// TokensToday 返回指定账号在当天（本地自然日 00:00:00 至今）对指定模型的累计消耗 TotalTokens。
+// 上游如 DeepSeek 等日限额按自然日（00:00:00）重置，故用于安全限额与配额均衡时应使用本方法，避免误算昨天历史用量。
+func (r *Recorder) TokensToday(uid, model string) int64 {
+	if r == nil || uid == "" || model == "" {
+		return 0
+	}
+	now := time.Now()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var total int64
+	for _, b := range r.buckets {
+		if b.UID != uid || b.Model != model {
+			continue
+		}
+		if ts, ok := bucketTime(b.Scope); ok {
+			if ts.After(todayStart) || ts.Equal(todayStart) {
+				total += b.TT
+			}
+		}
+	}
+	return total
+}
+
 // Rollup 把超出 hourlyKeep 的小时桶折叠为日桶（按本地日历日）。
 // 幂等：同一小时反复折叠不会重复计数（先累加再删源桶）。
 func (r *Recorder) Rollup(now time.Time) {

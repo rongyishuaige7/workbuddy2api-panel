@@ -389,3 +389,24 @@ func TestTokensInWindow(t *testing.T) {
 	}
 }
 
+func TestTokensToday(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// 今天内的消耗 (如果现在离零点不足1小时，用零点后1分钟；否则用20分钟前)
+	tToday := todayStart.Add(10 * time.Minute)
+	if now.Before(tToday) {
+		tToday = now
+	}
+	r.Add(tToday, "global", "uid_today", "deepseek-v4.1-flash", Delta{TotalTokens: 5000, HasTotal: true}, true)
+
+	// 昨天内的消耗 (todayStart 之前 2 小时)
+	r.Add(todayStart.Add(-2*time.Hour), "global", "uid_today", "deepseek-v4.1-flash", Delta{TotalTokens: 20000, HasTotal: true}, true)
+
+	// TokensToday 应当只统计今天的 5000，不含昨天的 20000
+	if got := r.TokensToday("uid_today", "deepseek-v4.1-flash"); got != 5000 {
+		t.Fatalf("TokensToday = %d, want 5000", got)
+	}
+}
+
