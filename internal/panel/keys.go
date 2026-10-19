@@ -55,7 +55,8 @@ func statsView(e keystats.Entry) keyStatsView {
 
 type apiKeyRow struct {
 	APIKeyView
-	Stats keyStatsView `json:"stats"`
+	Stats       keyStatsView `json:"stats"`
+	PromptCount int          `json:"prompt_count"`
 }
 
 type keySaveBody struct {
@@ -89,9 +90,13 @@ func (p *Panel) listKeys(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.KeyStats != nil {
 		stats = p.cfg.KeyStats.Snapshot()
 	}
+	counts := map[string]int{}
+	if p.cfg.PromptLog != nil {
+		counts = p.cfg.PromptLog.Counts()
+	}
 	rows := make([]apiKeyRow, 0, len(keys))
 	for _, k := range keys {
-		rows = append(rows, apiKeyRow{APIKeyView: k, Stats: statsView(stats[k.ID])})
+		rows = append(rows, apiKeyRow{APIKeyView: k, Stats: statsView(stats[k.ID]), PromptCount: counts[k.ID]})
 	}
 	orphans := 0
 	if p.cfg.KeyStats != nil {

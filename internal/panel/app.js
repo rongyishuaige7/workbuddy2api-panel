@@ -1758,7 +1758,8 @@ function renderKeys() {
       '<td>' + (k.rpm ? esc(String(k.rpm)) + ' rpm' : '<span class="note">不限</span>') + '</td>' +
       '<td>' + (k.daily_tokens ? fmtNum(k.daily_tokens) : '<span class="note">不限</span>') + '</td>' +
       '<td>' + state + '</td>' +
-      '<td>' + (k.capture_prompts ? '<span class="tag ok">记录</span>' : '<span class="note">—</span>') + '</td>' +
+      '<td>' + (k.capture_prompts ? '<span class="tag ok">记录</span>' : '<span class="note">—</span>') +
+        (Number(k.prompt_count || 0) ? ' <span class="note">' + fmtNum(k.prompt_count) + ' 条</span>' : '') + '</td>' +
       '<td>' + fmtNum(st.today_requests) + '</td>' +
       '<td>' + fmtNum(st.today_tokens) + '</td>' +
       '<td>' + fmtNum(st.requests) + '</td>' +
@@ -1965,7 +1966,7 @@ function fmtPromptContent(c) {
 function renderKeyPrompts() {
   const el = $('keyPromptList');
   if (!keyPromptData.length) {
-    el.innerHTML = '<div class="empty">该 key 暂无提示词记录（确认总开关已开启、该 key 勾选了「记录输入提示词」，且已重启）</div>';
+    el.innerHTML = '<div class="empty">该 key 暂无提示词记录。若总开关与 key 开关都已开启，通常只是还没有新的 chat 请求（/v1/models 不计）；也可能是请求发生在开启之前。</div>';
     return;
   }
   el.innerHTML = keyPromptData.map(e => {

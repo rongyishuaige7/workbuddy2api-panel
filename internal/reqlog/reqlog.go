@@ -89,6 +89,9 @@ type Event struct {
 	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
 	ClientIP        string `json:"client_ip,omitempty"`
 	UserAgent       string `json:"user_agent,omitempty"`
+	// 命中的下游密钥（ID/备注，不含密钥原文），用于把请求归属到具体 key。
+	APIKeyID   string `json:"api_key_id,omitempty"`
+	APIKeyName string `json:"api_key_name,omitempty"`
 }
 
 // Attempt 只记录一次 chat 出站的结构化诊断，不保存正文或任何鉴权字段。

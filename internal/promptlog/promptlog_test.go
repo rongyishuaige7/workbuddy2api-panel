@@ -160,3 +160,22 @@ func TestCaptureHeadAndTail(t *testing.T) {
 		t.Fatalf("head and tail must both survive, got %q", joined)
 	}
 }
+
+func TestCounts(t *testing.T) {
+	r := New(Config{Dir: t.TempDir(), RetentionDays: 3, MaxBytes: 1 << 20})
+	now := time.Now()
+	_ = r.Record(Entry{Time: now, KeyID: "k1", Messages: []Message{{"role": "user", "content": "a"}}})
+	_ = r.Record(Entry{Time: now, KeyID: "k1", Messages: []Message{{"role": "user", "content": "b"}}})
+	_ = r.Record(Entry{Time: now, KeyID: "k2", Messages: []Message{{"role": "user", "content": "c"}}})
+	c := r.Counts()
+	if c["k1"] != 2 || c["k2"] != 1 {
+		t.Fatalf("counts=%v", c)
+	}
+	if _, err := r.Clear("k1"); err != nil {
+		t.Fatal(err)
+	}
+	c = r.Counts()
+	if c["k1"] != 0 || c["k2"] != 1 {
+		t.Fatalf("after clear counts=%v", c)
+	}
+}

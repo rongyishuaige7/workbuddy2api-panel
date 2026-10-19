@@ -448,6 +448,8 @@ func (t *requestTrace) event(status int) reqlog.Event {
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent
+	e.APIKeyID = t.keyID
+	e.APIKeyName = t.keyName
 	if e.Outcome == "" {
 		if status >= 200 && status < 300 {
 			e.Outcome = reqlog.OutcomeSuccess

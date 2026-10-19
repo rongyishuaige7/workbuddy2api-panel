@@ -40,6 +40,7 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff") // 禁 MIME 嗅探
 	w.Header().Set("X-Frame-Options", "DENY")           // 老浏览器兜底（CSP frame-ancestors 的等价项）
 	w.Header().Set("Referrer-Policy", "no-referrer")    // 不外泄面板地址给外部站点
+	w.Header().Set("Cache-Control", "no-store")         // 面板/接口不缓存，避免看到过期的空列表
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 }

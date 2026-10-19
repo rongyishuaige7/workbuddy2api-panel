@@ -67,6 +67,9 @@ type Recorder struct {
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 	started bool
+
+	counts   map[string]int
+	countsAt time.Time
 }
 
 const (
@@ -268,6 +271,7 @@ func (r *Recorder) Record(e Entry) error {
 		return err
 	}
 	_, err = r.file.Write(line)
+	r.counts = nil
 	return err
 }
 
@@ -315,7 +319,9 @@ func (r *Recorder) Clear(keyID string) (int, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.rewriteLocked(func(e Entry) bool { return e.KeyID != keyID }), nil
+	n := r.rewriteLocked(func(e Entry) bool { return e.KeyID != keyID })
+	r.counts = nil
+	return n, nil
 }
 
 // Prune 删除不在 valid 集合里的 key 的记录（清理已删除 key 的残留）。
@@ -325,7 +331,9 @@ func (r *Recorder) Prune(valid map[string]bool) (int, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.rewriteLocked(func(e Entry) bool { return e.KeyID == "" || valid[e.KeyID] }), nil
+	n := r.rewriteLocked(func(e Entry) bool { return e.KeyID == "" || valid[e.KeyID] })
+	r.counts = nil
+	return n, nil
 }
 
 // rewriteLocked 逐文件重写，keep 返回 false 的行被删除并计数。
@@ -368,6 +376,45 @@ func (r *Recorder) rewriteLocked(keep func(Entry) bool) int {
 		}
 	}
 	return removed
+}
+
+// Counts 返回各 key 的归档条数（10s 缓存；写入后失效）。用于密钥列表展示。
+func (r *Recorder) Counts() map[string]int {
+	if r == nil || r.cfg.Dir == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.counts != nil && time.Since(r.countsAt) < 10*time.Second {
+		out := make(map[string]int, len(r.counts))
+		for k, v := range r.counts {
+			out[k] = v
+		}
+		return out
+	}
+	counts := make(map[string]int)
+	for _, p := range r.filesLocked() {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
+		for sc.Scan() {
+			var e Entry
+			if json.Unmarshal(sc.Bytes(), &e) == nil && e.KeyID != "" {
+				counts[e.KeyID]++
+			}
+		}
+		f.Close()
+	}
+	r.counts = counts
+	r.countsAt = time.Now()
+	out := make(map[string]int, len(counts))
+	for k, v := range counts {
+		out[k] = v
+	}
+	return out
 }
 
 // Start 启动每小时清理（保留天数/容量上限）。

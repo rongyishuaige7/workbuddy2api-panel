@@ -35,6 +35,11 @@ func TestKeyPromptsEndpoints(t *testing.T) {
 		return r
 	}
 
+	keysResp := do(http.MethodGet, "/panel/api/keys")
+	if !strings.Contains(keysResp.Body.String(), `"prompt_count":1`) {
+		t.Fatalf("keys should expose prompt_count: %s", keysResp.Body.String())
+	}
+
 	rec2 := do(http.MethodGet, "/panel/api/keys/k1/prompts")
 	if rec2.Code != http.StatusOK || !strings.Contains(rec2.Body.String(), "hello-monitor") {
 		t.Fatalf("list code=%d body=%s", rec2.Code, rec2.Body.String())
