@@ -357,7 +357,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `listen` | `:7863` | HTTP 监听地址 |
 | `api_key` | 空 | 网关鉴权密钥（`/v1/*`、`/status`）；**空 = 不鉴权直接放行**（公网必须设置） |
 | `panel.api_key` | 空 | 面板独立鉴权密钥（`/panel/api/*`）；空 = 回落 `api_key`。与 `api_key` 分开后，把 `api_key` 发给他人只授予调用权，不附带删号/改配置的管理权 |
-| `api_keys` | `[]` | 附加下游密钥数组，每项 `{id,name,key,models,rpm,daily_tokens,disabled}`；`models` 非空时该 key 只能调用列出的模型，`/v1/models` 也只返回这些模型，`/status` 不开放；`rpm` 为每分钟请求上限，`daily_tokens` 为每日 token 上限（均 0 = 不限），`disabled=true` 返回 403。`api_key` 始终是拥有者密钥（不限模型）。面板「API 密钥」视图可可视化增删改/启停/轮换、查看按天/按模型用量并清理孤儿统计 |
+| `api_keys` | `[]` | 附加下游密钥数组，每项 `{id,name,key,models,rpm,daily_tokens,capture_prompts,disabled}`；`models` 非空时该 key 只能调用列出的模型，`/v1/models` 也只返回这些模型，`/status` 不开放；`rpm` 为每分钟请求上限，`daily_tokens` 为每日 token 上限（均 0 = 不限），`capture_prompts` 开启后归档该 key 的输入提示词（还需全局开关），`disabled=true` 返回 403。`api_key` 始终是拥有者密钥（不限模型）。面板「API 密钥」视图可可视化增删改/启停/轮换、查看按天/按模型用量、查看提示词并清理孤儿统计 |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
@@ -365,6 +365,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
+| `logging.prompt_capture_enabled` | `false` | **输入提示词归档总开关（敏感）**；还需在具体 key 上设置 `capture_prompts=true`。改动需重启 |
+| `logging.prompt_retention_days` | `3` | 提示词归档保留天数；启动与每小时清理 |
+| `logging.prompt_max_mb` | `50` | 提示词归档总容量上限（MiB）；超限优先删除最旧文件 |
+| `logging.prompt_max_chars` | `20000` | 单请求捕获字符上限；单条消息另有 8000 字符上限，超出标记 truncated |
 | `cooldown.soft_rate` | `600s` | CN 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
 | `cooldown.global_soft_rate` | `10s` | global 域 429/14003 的账号级冷却基数；`0` = 不冷却 |
@@ -647,7 +651,7 @@ http://127.0.0.1:7863/panel/
 | **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
 | **任务中心** | 成长任务队列：一键扫描全部账号待办 → 按账号排队执行（账号内串行，账号间可选并发 1-3），进度实时更新；另含开学季券码查询。详见 [任务中心](#-任务中心面板新视图) |
 | **模型与档位** | 实时查询上游：每模型的积分倍率（含限时免费 / 夜间折扣等**生效价**与划线牌价）、默认思考档、支持的档位（含「off（可关）」）、上下文长度与最大输出；存在探测数据时最大输出列显示**实测上限与钳制告警**（见「探测模型真实输出上限」）。支持**按条件查询**：关键词（ID / 名称 / 描述 / 厂商 / 标签，空格分词 AND）、域（CN / Global）、能力（工具 / 视觉 / 思考 / 默认）、思考档位、价格（折扣 / 限时免费 / 打折），以及按倍率 / 上下文 / 最大输出 / ID 排序 |
-| **API 密钥** | 多 key 管理：新建（名称 / 模型白名单 / RPM / 日 Token 配额 / 启停）、编辑、禁用/启用、轮换、删除，保存即热生效；表格展示每把 key 的今日请求 / 今日 Token / 累计请求 / 累计 Token / 错误数 / 最近使用；行内「用量」展开按天曲线（7/30/90 天）与按模型明细；表头可清理孤儿统计。密钥默认掩码，可显示 / 复制。详见 [API 密钥](#api-密钥多-key--限速--用量) |
+| **API 密钥** | 多 key 管理：新建（名称 / 模型白名单 / RPM / 日 Token 配额 / 启停 / 记录提示词）、编辑、禁用/启用、轮换、删除，保存即热生效；表格展示每把 key 的今日请求 / 今日 Token / 累计请求 / 累计 Token / 错误数 / 最近使用；行内「用量」展开按天曲线（7/30/90 天）与按模型明细，行内「提示词」查看该 key 最近的输入 messages（需显式开启）；表头可清理孤儿统计。密钥默认掩码，可显示 / 复制。详见 [API 密钥](#api-密钥多-key--限速--用量) |
 | **配置** | 在线编辑 config.json：服务（监听地址 / API 密钥 / 单账号明细条数）、定时任务（签到 / 保活 / 旅行 / 活跃 / 夜猫子 / 成长任务六类时点与开关 + 余额刷新间隔）、账号池与流量治理、上游与高级（超时 / 出站 UA / 提示词模式 / 指纹脱敏 / 粘性路由）、日志（调用来源记录开关） |
 | **运行日志** | **请求记录表**（时间 / 结果 / 模型 / 账号 / **来源 IP** / **User-Agent** / 耗时 / Token / 积分 / 请求 ID），支持按 IP·UA·模型·账号·请求 ID 与结果筛选、读取条数、时间范围；下方 **运行日志** 按「任务 / 对话 / 系统」分频道，可开关自动滚动 |
 
@@ -665,6 +669,9 @@ http://127.0.0.1:7863/panel/
 - **用量**：按密钥 ID 聚合今日 / 累计请求数、prompt / completion token、错误数、最近使用时间；今日计数按本地时区跨天归零。表格行内「用量」可展开**按天曲线**（prompt/completion 堆叠柱，7/30/90 天）与**按模型明细**。统计每 30s 落盘到 `data/key_usage.json`（与 `state_file` 同目录），重启后恢复；按天历史保留 90 天。
 - **模型白名单**：受限 key 调白名单外模型返回 `403 model_not_allowed`，`/v1/models` 只返回白名单内模型，`/status` 返回 403。
 - **孤儿统计**：删除/改名后残留的密钥统计会在表头显示条数，点「清理孤儿统计」一次性移除（保留 `owner` 与当前配置中的 key）。
+- **提示词归档（敏感）**：需同时满足「配置 → 日志 → 记录输入提示词」总开关打开（重启生效）与该 key 勾选「记录输入提示词」。开启后，每次 chat 请求的 `messages`（角色 + 内容）写入 `data/prompt-logs/prompts-YYYY-MM-DD.jsonl`；行内「提示词」可查看最近 50 条、按 key 清空。只记录输入，不含响应、Authorization 或 token；单条消息 8000 字符、单请求 `prompt_max_chars` 字符上限，超出标记 truncated；默认保留 3 天 / 50 MiB，启动与每小时自动清理。
+
+> ⚠️ 提示词可能包含账号、密钥、个人隐私等敏感内容。只在确有审计需求的 key 上开启，控制 `panel.api_key` 的持有范围，并设置较短的 `prompt_retention_days`；不要对公网无鉴权开放面板。
 
 > 密钥以明文存放在 `config.json`（与 `api_key` 同口径）；面板密钥持有者可查看/复制。公网部署建议把 `panel.api_key` 设为独立强随机值，避免把 API 密钥发给他人时连带管理权限。
 

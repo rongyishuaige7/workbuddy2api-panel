@@ -23,6 +23,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/promptlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/ratelimit"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
@@ -282,6 +283,22 @@ func main() {
 	defer keyStats.Stop()
 	rateLimiter := ratelimit.New()
 
+	// 提示词归档（敏感）：默认关闭；只有全局开关 + 单 key 开关同时打开才写入。
+	var promptLog *promptlog.Recorder
+	if cfg.Logging.PromptCaptureEnabled {
+		promptLog = promptlog.New(promptlog.Config{
+			Dir:           stateSibling(cfg.StateFile, "prompt-logs"),
+			RetentionDays: cfg.Logging.PromptRetentionDays,
+			MaxBytes:      int64(cfg.Logging.PromptMaxMB) << 20,
+		})
+		promptLog.Start()
+		defer promptLog.Close()
+		log.Printf("[promptlog] 提示词归档已启用: %s（保留 %d 天，上限 %d MiB）",
+			stateSibling(cfg.StateFile, "prompt-logs"), cfg.Logging.PromptRetentionDays, cfg.Logging.PromptMaxMB)
+	} else {
+		log.Printf("[promptlog] 提示词归档未启用（logging.prompt_capture_enabled=false）")
+	}
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -305,7 +322,8 @@ func main() {
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
 		},
-		KeyStats: keyStats,
+		KeyStats:  keyStats,
+		PromptLog: promptLog,
 		ListAPIKeys: func() ([]panel.APIKeyView, error) {
 			c, err := Load(*cfgPath)
 			if err != nil {
@@ -315,7 +333,8 @@ func main() {
 			for _, k := range c.APIKeys {
 				out = append(out, panel.APIKeyView{
 					ID: k.ID, Name: k.Name, Key: k.Key,
-					Models: k.Models, RPM: k.RPM, DailyTokens: k.DailyTokens, Disabled: k.Disabled,
+					Models: k.Models, RPM: k.RPM, DailyTokens: k.DailyTokens,
+					CapturePrompts: k.CapturePrompts, Disabled: k.Disabled,
 				})
 			}
 			return out, nil
@@ -325,7 +344,8 @@ func main() {
 			for _, k := range keys {
 				arr = append(arr, map[string]any{
 					"id": k.ID, "name": k.Name, "key": k.Key,
-					"models": k.Models, "rpm": k.RPM, "daily_tokens": k.DailyTokens, "disabled": k.Disabled,
+					"models": k.Models, "rpm": k.RPM, "daily_tokens": k.DailyTokens,
+					"capture_prompts": k.CapturePrompts, "disabled": k.Disabled,
 				})
 			}
 			raw, err := json.Marshal(map[string]any{"api_keys": arr})
@@ -359,6 +379,8 @@ func main() {
 		RequestLog:         requestLog,
 		RateLimit:          rateLimiter,
 		KeyStats:           keyStats,
+		PromptLog:          promptLog,
+		PromptMaxChars:     cfg.Logging.PromptMaxChars,
 		PromptMode:         cfg.Prompt.Mode,
 		PromptText:         cfg.PromptText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
@@ -633,6 +655,10 @@ func restartRequiredFields(oldCfg, newCfg *Config) []string {
 	add(oldCfg.Logging.RequestArchiveEnabled != newCfg.Logging.RequestArchiveEnabled, "logging.request_archive_enabled")
 	add(oldCfg.Logging.RequestRetentionDays != newCfg.Logging.RequestRetentionDays, "logging.request_retention_days")
 	add(oldCfg.Logging.RequestArchiveMaxMB != newCfg.Logging.RequestArchiveMaxMB, "logging.request_archive_max_mb")
+	add(oldCfg.Logging.PromptCaptureEnabled != newCfg.Logging.PromptCaptureEnabled, "logging.prompt_capture_enabled")
+	add(oldCfg.Logging.PromptRetentionDays != newCfg.Logging.PromptRetentionDays, "logging.prompt_retention_days")
+	add(oldCfg.Logging.PromptMaxMB != newCfg.Logging.PromptMaxMB, "logging.prompt_max_mb")
+	add(oldCfg.Logging.PromptMaxChars != newCfg.Logging.PromptMaxChars, "logging.prompt_max_chars")
 	add(oldCfg.Server.ReadTimeout != newCfg.Server.ReadTimeout, "server.read_timeout")
 	return out
 }
@@ -650,6 +676,7 @@ func allRestartRequiredFields() []string {
 		"session_sticky.enabled", "session_sticky.ttl", "session_sticky.gc_interval",
 		"prompt.mode", "prompt.file",
 		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
+		"logging.prompt_capture_enabled", "logging.prompt_retention_days", "logging.prompt_max_mb", "logging.prompt_max_chars",
 		"server.read_timeout",
 	}
 }
@@ -680,7 +707,8 @@ func apiKeyPolicies(cfg *Config) []httpauth.Policy {
 	for _, k := range cfg.APIKeys {
 		out = append(out, httpauth.Policy{
 			ID: k.ID, Key: k.Key, Name: k.Name,
-			Models: k.Models, RPM: k.RPM, DailyTokens: k.DailyTokens, Disabled: k.Disabled,
+			Models: k.Models, RPM: k.RPM, DailyTokens: k.DailyTokens,
+			CapturePrompts: k.CapturePrompts, Disabled: k.Disabled,
 		})
 	}
 	return out

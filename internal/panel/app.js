@@ -1558,6 +1558,9 @@ const CFG_MAP = {
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  prompt_capture_enabled: ['logging', 'prompt_capture_enabled'],
+  prompt_retention_days: ['logging', 'prompt_retention_days'],
+  prompt_max_mb: ['logging', 'prompt_max_mb'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -1705,6 +1708,8 @@ let keysCache = [];
 let keyEditId = '';
 let keyUsageId = '';
 let keyUsageData = [];
+let keyPromptId = '';
+let keyPromptData = [];
 
 function maskKey(k) {
   if (!k) return '—';
@@ -1733,7 +1738,7 @@ async function loadKeys() {
 function renderKeys() {
   const tb = $('keysBody');
   if (!keysCache.length) {
-    tb.innerHTML = '<tr><td colspan="13"><div class="empty"><div class="big">还没有附加密钥</div>点右上角「新建密钥」给他人发放一把。</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="14"><div class="empty"><div class="big">还没有附加密钥</div>点右上角「新建密钥」给他人发放一把。</div></td></tr>';
     return;
   }
   tb.innerHTML = keysCache.map(k => {
@@ -1752,6 +1757,7 @@ function renderKeys() {
       '<td>' + (k.rpm ? esc(String(k.rpm)) + ' rpm' : '<span class="note">不限</span>') + '</td>' +
       '<td>' + (k.daily_tokens ? fmtNum(k.daily_tokens) : '<span class="note">不限</span>') + '</td>' +
       '<td>' + state + '</td>' +
+      '<td>' + (k.capture_prompts ? '<span class="tag ok">记录</span>' : '<span class="note">—</span>') + '</td>' +
       '<td>' + fmtNum(st.today_requests) + '</td>' +
       '<td>' + fmtNum(st.today_tokens) + '</td>' +
       '<td>' + fmtNum(st.requests) + '</td>' +
@@ -1760,6 +1766,7 @@ function renderKeys() {
       '<td>' + fmtWhen(st.last_used) + '</td>' +
       '<td class="acts">' +
         '<button class="xs" data-act="usage">用量</button>' +
+        '<button class="xs" data-act="prompts">提示词</button>' +
         '<button class="xs" data-act="edit">编辑</button>' +
         '<button class="xs" data-act="toggle">' + (k.disabled ? '启用' : '禁用') + '</button>' +
         '<button class="xs" data-act="rotate">轮换</button>' +
@@ -1776,6 +1783,7 @@ function openKeyForm(k) {
   $('keyDaily').value = k && k.daily_tokens ? String(k.daily_tokens) : '';
   $('keyModels').value = k && k.models ? k.models.join(', ') : '';
   $('keyEnabled').checked = k ? !k.disabled : true;
+  $('keyCapture').checked = !!(k && k.capture_prompts);
   $('keyFormNote').textContent = k ? k.id : '保存后生成新密钥，创建时会自动复制';
   $('keyFormBox').hidden = false;
   $('keyName').focus();
@@ -1798,6 +1806,7 @@ $('keysBody').addEventListener('click', async ev => {
     }
     if (act === 'copy') { await copyText(k.key); toast('密钥已复制', 'ok'); return; }
     if (act === 'usage') { openKeyUsage(k); return; }
+    if (act === 'prompts') { openKeyPrompts(k); return; }
     if (act === 'edit') { openKeyForm(k); return; }
     if (act === 'toggle') {
       await api('keys/' + encodeURIComponent(k.id) + '/toggle', { method: 'POST' });
@@ -1837,6 +1846,7 @@ $('btnKeySave').onclick = async () => {
     models: $('keyModels').value.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean),
     rpm: rpm,
     daily_tokens: daily,
+    capture_prompts: $('keyCapture').checked,
     disabled: !$('keyEnabled').checked,
   };
   try {
@@ -1921,6 +1931,52 @@ $('btnKeysPrune').onclick = async () => {
     toast('已清理 ' + (r.removed || 0) + ' 条孤儿统计', 'ok');
     await loadKeys();
   } catch (e) { toast('清理失败：' + e.message, 'err'); }
+};
+
+
+/* 输入提示词查看 */
+function openKeyPrompts(k) {
+  keyPromptId = k.id;
+  $('keyPromptTitle').textContent = '输入提示词 · ' + (k.name || k.id);
+  $('keyPromptBox').hidden = false;
+  loadKeyPrompts();
+}
+async function loadKeyPrompts() {
+  if (!keyPromptId) return;
+  try {
+    const d = await api('keys/' + encodeURIComponent(keyPromptId) + '/prompts?limit=50');
+    keyPromptData = d.entries || [];
+    $('keyPromptNote').textContent = keyPromptData.length ? keyPromptData.length + ' 条（新→旧）' : '暂无记录';
+    renderKeyPrompts();
+  } catch (e) { toast('读取提示词失败：' + e.message, 'err'); }
+}
+function fmtPromptContent(c) {
+  if (typeof c === 'string') return c;
+  try { return JSON.stringify(c, null, 2); } catch { return String(c); }
+}
+function renderKeyPrompts() {
+  const el = $('keyPromptList');
+  if (!keyPromptData.length) {
+    el.innerHTML = '<div class="empty">该 key 暂无提示词记录（确认总开关已开启、该 key 勾选了「记录输入提示词」，且已重启）</div>';
+    return;
+  }
+  el.innerHTML = keyPromptData.map(e => {
+    const msgs = (e.messages || []).map(m => '<div style="margin-top:6px"><span class="tag">' + esc(m.role || '?') + '</span>' +
+      '<pre style="white-space:pre-wrap;word-break:break-word;margin:4px 0 0;font-size:12px;line-height:1.5">' + esc(fmtPromptContent(m.content)) + '</pre></div>').join('');
+    return '<div style="border:1px solid var(--line, #333);border-radius:8px;padding:10px 12px;margin-bottom:10px">' +
+      '<div class="note">' + fmtWhen(e.time) + ' · ' + esc(e.model || '—') + ' · HTTP ' + esc(String(e.status || 0)) + ' · ' + esc(e.request_id || '') + (e.truncated ? ' · <b>已截断</b>' : '') + '</div>' +
+      msgs + '</div>';
+  }).join('');
+}
+$('btnKeyPromptRefresh').onclick = loadKeyPrompts;
+$('btnKeyPromptClose').onclick = () => { $('keyPromptBox').hidden = true; keyPromptId = ''; };
+$('btnKeyPromptClear').onclick = async () => {
+  if (!confirm('清空该 key 的全部提示词记录？')) return;
+  try {
+    const r = await api('keys/' + encodeURIComponent(keyPromptId) + '/prompts/clear', { method: 'POST' });
+    toast('已清空 ' + (r.removed || 0) + ' 条', 'ok');
+    await loadKeyPrompts();
+  } catch (e) { toast('清空失败：' + e.message, 'err'); }
 };
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */

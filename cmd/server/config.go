@@ -28,7 +28,9 @@ type APIKeyConfig struct {
 	Models      []string `json:"models"`       // 允许的模型 id；空 = 不限
 	RPM         int      `json:"rpm"`          // 每分钟请求上限；0 = 不限
 	DailyTokens int64    `json:"daily_tokens"` // 每日 token 上限；0 = 不限
-	Disabled    bool     `json:"disabled"`     // 禁用后返回 403 key_disabled（不删除配置，便于随时恢复）
+	// CapturePrompts 是否归档该 key 的输入提示词（还需全局开关打开）。
+	CapturePrompts bool `json:"capture_prompts"`
+	Disabled       bool `json:"disabled"` // 禁用后返回 403 key_disabled（不删除配置，便于随时恢复）
 }
 
 // deriveKeyID 由密钥值派生稳定 ID（旧配置没有 id 时使用）。
@@ -72,6 +74,16 @@ type Config struct {
 		// 关掉。关闭后 Event.ClientIP/UserAgent 保持为空，归档里不出现该字段。
 		// 热生效（经 livecfg 快照），无需重启。
 		RequestClientInfo bool `json:"request_client_info"`
+
+		// PromptCaptureEnabled 提示词归档总开关（默认关）。只有同时满足
+		// 「本开关打开 + 该 key 的 capture_prompts=true」才记录；改动需重启。
+		PromptCaptureEnabled bool `json:"prompt_capture_enabled"`
+		// PromptRetentionDays 提示词归档保留天数，缺省 3；<=0 回落默认。
+		PromptRetentionDays int `json:"prompt_retention_days"`
+		// PromptMaxMB 提示词归档总容量上限（MiB），缺省 50；<=0 回落默认。
+		PromptMaxMB int `json:"prompt_max_mb"`
+		// PromptMaxChars 单请求捕获的字符上限，缺省 20000；<=0 回落默认。
+		PromptMaxChars int `json:"prompt_max_chars"`
 	} `json:"logging"`
 
 	Server struct {
@@ -558,6 +570,15 @@ func (c *Config) normalize() error {
 	}
 	if c.Logging.RequestArchiveMaxMB <= 0 {
 		c.Logging.RequestArchiveMaxMB = 100
+	}
+	if c.Logging.PromptRetentionDays <= 0 {
+		c.Logging.PromptRetentionDays = 3
+	}
+	if c.Logging.PromptMaxMB <= 0 {
+		c.Logging.PromptMaxMB = 50
+	}
+	if c.Logging.PromptMaxChars <= 0 {
+		c.Logging.PromptMaxChars = 20000
 	}
 	// 入站读取上限（issue #100）：空值回落默认 300s；"0" 合法（不限制）；
 	// 负值无语义，fail fast（静默钳 0 会把保护悄悄关掉）。

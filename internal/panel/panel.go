@@ -26,6 +26,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/keystats"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/promptlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -71,6 +72,8 @@ type Config struct {
 
 	// KeyStats 每密钥用量统计（nil = 密钥视图不展示统计）。
 	KeyStats *keystats.Recorder
+	// PromptLog 输入提示词归档（nil = 未启用，提示词接口返回 501）。
+	PromptLog *promptlog.Recorder
 	// ListAPIKeys / SaveAPIKeys 是「API 密钥」视图的读写闭包（main 注入，
 	// 面板不依赖 cmd/server 的配置类型）。SaveAPIKeys 走同一套校验 + 热生效。
 	ListAPIKeys func() ([]APIKeyView, error)
@@ -208,6 +211,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/keys/{id}/rotate", p.withAuth(p.rotateKey))
 	p.mux.HandleFunc("POST /panel/api/keys/{id}/remove", p.withAuth(p.removeKey))
 	p.mux.HandleFunc("GET /panel/api/keys/{id}/usage", p.withAuth(p.keyUsage))
+	p.mux.HandleFunc("GET /panel/api/keys/{id}/prompts", p.withAuth(p.keyPrompts))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/prompts/clear", p.withAuth(p.clearKeyPrompts))
 	p.mux.HandleFunc("POST /panel/api/keys/prune_stats", p.withAuth(p.pruneKeyStats))
 }
 

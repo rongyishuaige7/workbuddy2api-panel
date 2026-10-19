@@ -25,6 +25,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/promptlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/ratelimit"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
@@ -42,6 +43,10 @@ type Config struct {
 	RateLimit *ratelimit.Limiter
 	// KeyStats 每密钥用量统计（nil = 不统计）。
 	KeyStats *keystats.Recorder
+	// PromptLog 输入提示词归档（nil = 未启用）。
+	PromptLog *promptlog.Recorder
+	// PromptMaxChars 单请求捕获字符上限（<=0 回落 20000）。
+	PromptMaxChars int
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -203,7 +208,7 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if (h.cfg.RequestLog != nil || h.cfg.KeyStats != nil) && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
+	if (h.cfg.RequestLog != nil || h.cfg.KeyStats != nil || h.cfg.PromptLog != nil) && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
 		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
@@ -232,6 +237,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					model = trace.stat.model
 				}
 				h.cfg.KeyStats.Record(trace.keyID, model, status, pt, ct)
+			}
+			// 提示词归档：在出口记录，才能带上最终状态码与改写后的模型名。
+			if h.cfg.PromptLog != nil && trace.keyID != "" && len(trace.promptMessages) > 0 {
+				model := trace.model
+				if trace.stat != nil && trace.stat.model != "" {
+					model = trace.stat.model
+				}
+				if err := h.cfg.PromptLog.Record(promptlog.Entry{
+					Time: trace.start, KeyID: trace.keyID, KeyName: trace.keyName,
+					RequestID: trace.id, Model: model, Status: status,
+					Messages: trace.promptMessages, Truncated: trace.promptTruncated,
+					Bytes: trace.promptBytes,
+				}); err != nil {
+					log.Printf("[promptlog] record: %v", err)
+				}
 			}
 		}()
 		h.mux.ServeHTTP(obs, r)
@@ -722,6 +742,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+
+	// 提示词归档：只在该 key 显式开启时抓取（模型被拒的请求也保留，便于审计）。
+	if h.cfg.PromptLog != nil && policyFrom(r).CapturePrompts {
+		if tr := requestTraceFrom(r); tr != nil {
+			msgs, truncated, bytes := promptlog.Capture(body, h.cfg.PromptMaxChars)
+			tr.promptMessages, tr.promptTruncated, tr.promptBytes = msgs, truncated, bytes
+			tr.model = peek.Model
+		}
+	}
 
 	// 密钥级模型白名单：在选号/改写/出站之前拒绝，避免受限密钥触发任何上游调用。
 	// 空 model 无法核验，对受限密钥同样拒绝。

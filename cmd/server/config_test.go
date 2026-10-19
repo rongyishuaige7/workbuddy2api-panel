@@ -929,3 +929,23 @@ func TestAPIKeyDailyTokensValidation(t *testing.T) {
 		t.Error("负 daily_tokens 必须 fail fast")
 	}
 }
+
+func TestPromptCaptureDefaults(t *testing.T) {
+	c, err := ParseConfig([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Logging.PromptCaptureEnabled {
+		t.Error("prompt capture must default off")
+	}
+	if c.Logging.PromptRetentionDays != 3 || c.Logging.PromptMaxMB != 50 || c.Logging.PromptMaxChars != 20000 {
+		t.Fatalf("logging=%+v", c.Logging)
+	}
+	c2, err := ParseConfig([]byte(`{"api_keys":[{"key":"sk-x","capture_prompts":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c2.APIKeys[0].CapturePrompts {
+		t.Error("capture_prompts should parse")
+	}
+}

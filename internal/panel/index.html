@@ -955,7 +955,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="tbl-wrap">
           <table class="acc zebra">
             <thead><tr>
-              <th>名称</th><th>密钥</th><th>模型限制</th><th>限速</th><th>日 Token 配额</th><th>状态</th>
+              <th>名称</th><th>密钥</th><th>模型限制</th><th>限速</th><th>日 Token 配额</th><th>状态</th><th>提示词</th>
               <th>今日请求</th><th>今日 Token</th><th>累计请求</th><th>累计 Token</th><th>错误</th><th>最近使用</th><th>操作</th>
             </tr></thead>
             <tbody id="keysBody"></tbody>
@@ -978,6 +978,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <input id="keyModels" placeholder="global:deepseek-v4.1-flash"></label>
           <div class="switch"><span class="lb">启用</span>
             <input type="checkbox" id="keyEnabled" checked></div>
+          <div class="switch"><span class="lb">记录输入提示词（敏感）</span>
+            <input type="checkbox" id="keyCapture"></div>
+          <div class="hint" style="margin:-4px 0 10px">需在「配置 → 日志」打开总开关并重启；仅记录请求 messages，不含响应与密钥</div>
           <div class="inline" style="margin-top:12px">
             <button class="primary" id="btnKeySave">保存</button>
             <button id="btnKeyCancel">取消</button>
@@ -1008,6 +1011,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             </table>
           </div>
         </div>
+      </div>
+      <div class="box" id="keyPromptBox" hidden>
+        <header>
+          <h3 id="keyPromptTitle">输入提示词</h3>
+          <span class="grow"></span>
+          <span class="note" id="keyPromptNote"></span>
+          <button class="xs" id="btnKeyPromptRefresh">刷新</button>
+          <button class="xs danger" id="btnKeyPromptClear">清空该 key 记录</button>
+          <button class="xs" id="btnKeyPromptClose">关闭</button>
+        </header>
+        <div class="pad" id="keyPromptList"></div>
       </div>
     </section>
 
@@ -1214,6 +1228,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <input type="checkbox" name="request_client_info"></div>
             <div class="hint">开启后，「运行日志」页的请求记录会显示每次调用来自哪个 IP、用什么客户端；
               关闭则归档与面板都不再出现来源信息。改动即时生效，无需重启。</div>
+            <div class="hr"></div>
+            <div class="switch"><span class="lb">记录输入提示词（敏感，需重启）</span>
+              <input type="checkbox" name="prompt_capture_enabled"></div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">提示词保留天数</span>
+                <input name="prompt_retention_days" type="number" min="1" placeholder="3"></label>
+              <label class="fld"><span class="lb">提示词容量上限（MB）</span>
+                <input name="prompt_max_mb" type="number" min="1" placeholder="50"></label>
+            </div>
+            <div class="hint">总开关打开后，还需在「API 密钥」里为具体 key 勾选「记录输入提示词」才会落盘；
+              只记录请求 messages（单条/单请求有截断），不含响应与密钥。文件位于 <code>data/prompt-logs/</code>，按保留天数与容量自动清理。</div>
             <div class="hint" style="margin-top:8px">归档开关、保留天数与容量上限（<code>logging.request_archive_*</code>）需手工编辑配置文件。</div>
           </div>
         </div>

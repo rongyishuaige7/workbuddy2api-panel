@@ -41,13 +41,14 @@ func VerifyBearer(r *http.Request, key string) bool {
 // 顶层 api_key 是拥有者密钥（Models 为空 = 不限模型）；api_keys 里的附加密钥
 // 可各带模型白名单，用于「把 key 给别人但只允许用某个模型」。
 type Policy struct {
-	ID          string   // 稳定标识（统计/限速按它聚合；轮换密钥值不变）
-	Key         string   // 密钥原文（仅内存；不写日志）
-	Name        string   // 标识（日志/排障用，可为空）
-	Models      []string // 允许的模型 id；空 = 不限
-	RPM         int      // 每分钟请求上限；0 = 不限
-	DailyTokens int64    // 每日 token 上限；0 = 不限（仅对 chat 请求判定）
-	Disabled    bool     // 已禁用：鉴权命中但拒绝服务（403 key_disabled）
+	ID             string   // 稳定标识（统计/限速按它聚合；轮换密钥值不变）
+	Key            string   // 密钥原文（仅内存；不写日志）
+	Name           string   // 标识（日志/排障用，可为空）
+	Models         []string // 允许的模型 id；空 = 不限
+	RPM            int      // 每分钟请求上限；0 = 不限
+	DailyTokens    int64    // 每日 token 上限；0 = 不限（仅对 chat 请求判定）
+	CapturePrompts bool     // 是否归档该 key 的输入提示词（还需全局开关）
+	Disabled       bool     // 已禁用：鉴权命中但拒绝服务（403 key_disabled）
 }
 
 // Unrestricted 是否不限制模型。

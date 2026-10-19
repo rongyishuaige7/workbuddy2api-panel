@@ -22,13 +22,14 @@ import (
 
 // APIKeyView 一把下游密钥的配置视图（含明文 key，仅面板密钥持有者可见）。
 type APIKeyView struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Key         string   `json:"key"`
-	Models      []string `json:"models"`
-	RPM         int      `json:"rpm"`
-	DailyTokens int64    `json:"daily_tokens"`
-	Disabled    bool     `json:"disabled"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Key            string   `json:"key"`
+	Models         []string `json:"models"`
+	RPM            int      `json:"rpm"`
+	DailyTokens    int64    `json:"daily_tokens"`
+	CapturePrompts bool     `json:"capture_prompts"`
+	Disabled       bool     `json:"disabled"`
 }
 
 // keyStatsView 列表用的精简统计（不带按天历史，避免列表响应过大）。
@@ -58,12 +59,13 @@ type apiKeyRow struct {
 }
 
 type keySaveBody struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Models      []string `json:"models"`
-	RPM         int      `json:"rpm"`
-	DailyTokens int64    `json:"daily_tokens"`
-	Disabled    bool     `json:"disabled"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Models         []string `json:"models"`
+	RPM            int      `json:"rpm"`
+	DailyTokens    int64    `json:"daily_tokens"`
+	CapturePrompts bool     `json:"capture_prompts"`
+	Disabled       bool     `json:"disabled"`
 }
 
 func (p *Panel) keysAvailable(w http.ResponseWriter) bool {
@@ -148,7 +150,8 @@ func (p *Panel) saveKey(w http.ResponseWriter, r *http.Request) {
 		id := keyID(key)
 		keys = append(keys, APIKeyView{
 			ID: id, Name: b.Name, Key: key, Models: models,
-			RPM: b.RPM, DailyTokens: b.DailyTokens, Disabled: b.Disabled,
+			RPM: b.RPM, DailyTokens: b.DailyTokens,
+			CapturePrompts: b.CapturePrompts, Disabled: b.Disabled,
 		})
 		if err := p.cfg.SaveAPIKeys(keys); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -173,6 +176,7 @@ func (p *Panel) saveKey(w http.ResponseWriter, r *http.Request) {
 	keys[idx].Models = models
 	keys[idx].RPM = b.RPM
 	keys[idx].DailyTokens = b.DailyTokens
+	keys[idx].CapturePrompts = b.CapturePrompts
 	keys[idx].Disabled = b.Disabled
 	if err := p.cfg.SaveAPIKeys(keys); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -339,6 +343,74 @@ func (p *Panel) pruneKeyStats(w http.ResponseWriter, r *http.Request) {
 		valid[k.ID] = true
 	}
 	n := p.cfg.KeyStats.Prune(valid)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n})
+}
+
+// keyPrompts 返回指定 key 最近的输入提示词归档（新→旧）。
+func (p *Panel) keyPrompts(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.PromptLog == nil || p.cfg.ListAPIKeys == nil {
+		writeErr(w, http.StatusNotImplemented, "prompt log not available")
+		return
+	}
+	id := r.PathValue("id")
+	keys, err := p.cfg.ListAPIKeys()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "list keys: "+err.Error())
+		return
+	}
+	name, found := "", false
+	for _, k := range keys {
+		if k.ID == id {
+			name, found = k.Name, true
+			break
+		}
+	}
+	if !found {
+		writeErr(w, http.StatusNotFound, "key not found")
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	entries, err := p.cfg.PromptLog.List(id, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "list prompts: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"key_id": id, "key_name": name, "entries": entries})
+}
+
+// clearKeyPrompts 清空指定 key 的提示词归档。
+func (p *Panel) clearKeyPrompts(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.PromptLog == nil || p.cfg.ListAPIKeys == nil {
+		writeErr(w, http.StatusNotImplemented, "prompt log not available")
+		return
+	}
+	id := r.PathValue("id")
+	keys, err := p.cfg.ListAPIKeys()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "list keys: "+err.Error())
+		return
+	}
+	found := false
+	for _, k := range keys {
+		if k.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeErr(w, http.StatusNotFound, "key not found")
+		return
+	}
+	n, err := p.cfg.PromptLog.Clear(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "clear prompts: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n})
 }
 
