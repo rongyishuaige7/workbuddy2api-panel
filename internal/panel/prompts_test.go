@@ -14,7 +14,11 @@ func TestKeyPromptsEndpoints(t *testing.T) {
 	rec := promptlog.New(promptlog.Config{Dir: t.TempDir(), RetentionDays: 3, MaxBytes: 1 << 20})
 	if err := rec.Record(promptlog.Entry{
 		Time: time.Now(), KeyID: "k1", KeyName: "friend", Model: "global:deepseek-v4.1-flash", Status: 200,
-		Messages: []promptlog.Message{{"role": "user", "content": "hello-monitor"}},
+		Messages: []promptlog.Message{
+			{"role": "developer", "content": "dev-only"},
+			{"role": "user", "content": "hello-monitor"},
+			{"role": "tool", "content": "tool-out"},
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -41,8 +45,13 @@ func TestKeyPromptsEndpoints(t *testing.T) {
 	}
 
 	rec2 := do(http.MethodGet, "/panel/api/keys/k1/prompts")
-	if rec2.Code != http.StatusOK || !strings.Contains(rec2.Body.String(), "hello-monitor") {
+	if rec2.Code != http.StatusOK || !strings.Contains(rec2.Body.String(), "hello-monitor") || !strings.Contains(rec2.Body.String(), "dev-only") {
 		t.Fatalf("list code=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	userOnly := do(http.MethodGet, "/panel/api/keys/k1/prompts?role=user")
+	if userOnly.Code != http.StatusOK || !strings.Contains(userOnly.Body.String(), "hello-monitor") ||
+		strings.Contains(userOnly.Body.String(), "dev-only") || strings.Contains(userOnly.Body.String(), "tool-out") {
+		t.Fatalf("role=user body=%s", userOnly.Body.String())
 	}
 
 	rec2 = do(http.MethodPost, "/panel/api/keys/k1/prompts/clear")

@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/keystats"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/promptlog"
 )
 
 // APIKeyView 一把下游密钥的配置视图（含明文 key，仅面板密钥持有者可见）。
@@ -384,6 +385,19 @@ func (p *Panel) keyPrompts(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "list prompts: "+err.Error())
 		return
+	}
+	// role=user 时只返回 user 消息：面板默认只看用户输入，避免把
+	// developer/system/tool/assistant 的内部上下文铺满屏幕，也大幅缩小响应体。
+	if r.URL.Query().Get("role") == "user" {
+		for i := range entries {
+			filtered := make([]promptlog.Message, 0, len(entries[i].Messages))
+			for _, m := range entries[i].Messages {
+				if role, _ := m["role"].(string); role == "user" {
+					filtered = append(filtered, m)
+				}
+			}
+			entries[i].Messages = filtered
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"key_id": id, "key_name": name, "entries": entries})
 }
