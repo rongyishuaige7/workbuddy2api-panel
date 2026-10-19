@@ -190,14 +190,13 @@ func TestIsHarnessContext(t *testing.T) {
 		"Instructions from: ~/.dsh/AGENTS.md",
 		"Current working directory: /x",
 		"Attached image(s) from tool result:\n[图片]",
-		"交付状态: COMMITTED_AND_PUSHED",
 	}
 	for _, s := range yes {
 		if !IsHarnessContext(s) {
 			t.Errorf("should be harness context: %q", s)
 		}
 	}
-	for _, s := range []string{"牛魔", "帮我看看这个 bug", "Time is money", ""} {
+	for _, s := range []string{"牛魔", "帮我看看这个 bug", "Time is money", "交付状态: COMMITTED_AND_PUSHED", "Attached image of my bug", "Attached file: task.txt", ""} {
 		if IsHarnessContext(s) {
 			t.Errorf("should be user input: %q", s)
 		}

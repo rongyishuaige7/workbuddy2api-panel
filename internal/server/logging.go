@@ -360,12 +360,9 @@ type requestTrace struct {
 	// statsDone 表示 withAuth 已记账（禁用/限速的拒绝），出口不再重复计数。
 	statsDone bool
 	// 提示词归档（仅该 key 开启 capture_prompts 且全局开关打开时填充）。
-	promptMessages  []promptlog.Message
-	promptOmitted   int
-	promptTools     []string
-	promptTruncated bool
-	promptBytes     int
-	model           string
+	promptCapture     promptlog.CaptureResult
+	promptSessionHash string
+	model             string
 }
 
 // captureClientInfo 采集调用来源（客户端 IP + 截断后的 UA）。开关关闭时保持空串：

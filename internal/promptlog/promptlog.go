@@ -5,14 +5,13 @@
 //     时才记录；
 //   - 只记录请求的 messages（完整消息对象，含 tool_calls/tool_call_id 等）与工具名，
 //     不记录响应、Authorization、token、工具 schema；
-//   - 预算从最新消息往前分配（审计最关心最后一轮），单条/单请求都有上限；
+//   - 优先保留用户输入，裁剪前保存消息身份，单条/单请求都有上限；
 //   - 文件 0600、目录 0700，按天分文件，按保留天数/总容量自动清理。
 package promptlog
 
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,14 +25,22 @@ type Message map[string]any
 
 // Entry 一次请求的提示词快照。
 type Entry struct {
-	Time      time.Time `json:"time"`
-	KeyID     string    `json:"key_id"`
-	KeyName   string    `json:"key_name"`
-	RequestID string    `json:"request_id"`
-	Model     string    `json:"model"`
-	Status    int       `json:"status"`
-	Messages  []Message `json:"messages"`
-	// Omitted 因预算省略的较早消息条数；Tools 请求声明的工具名（不含 schema）。
+	Version          int       `json:"version,omitempty"`
+	SessionHash      string    `json:"session_hash,omitempty"`
+	MessageIndexes   []int     `json:"message_indexes,omitempty"`
+	Inputs           []Input   `json:"inputs,omitempty"`
+	InputsOmitted    int       `json:"inputs_omitted,omitempty"`
+	OriginalMessages int       `json:"original_messages,omitempty"`
+	FreshState       string    `json:"fresh_state,omitempty"`
+	FreshReason      string    `json:"fresh_reason,omitempty"`
+	Time             time.Time `json:"time"`
+	KeyID            string    `json:"key_id"`
+	KeyName          string    `json:"key_name"`
+	RequestID        string    `json:"request_id"`
+	Model            string    `json:"model"`
+	Status           int       `json:"status"`
+	Messages         []Message `json:"messages"`
+	// Omitted 因预算省略的消息条数；Tools 请求声明的工具名（不含 schema）。
 	Omitted   int      `json:"omitted,omitempty"`
 	Tools     []string `json:"tools,omitempty"`
 	Truncated bool     `json:"truncated"`
@@ -42,11 +49,16 @@ type Entry struct {
 
 // CaptureResult Capture 的返回。
 type CaptureResult struct {
-	Messages  []Message
-	Omitted   int
-	Tools     []string
-	Truncated bool
-	Bytes     int
+	SessionHash      string
+	MessageIndexes   []int
+	Inputs           []Input
+	InputsOmitted    int
+	OriginalMessages int
+	Messages         []Message
+	Omitted          int
+	Tools            []string
+	Truncated        bool
+	Bytes            int
 }
 
 // Config 归档配置。
@@ -110,9 +122,6 @@ var harnessPrefixes = []string{
 	"A user may also invoke a skill directly",
 	"Skills load from",
 	"Attached image(s) from tool result",
-	"Attached image",
-	"Attached file",
-	"交付状态:",
 }
 
 // IsHarnessContext 判断一段 user 内容是否是 harness 注入的上下文/通知。
@@ -130,202 +139,6 @@ func IsHarnessContext(s string) bool {
 		return true
 	}
 	return false
-}
-
-// Capture 从 chat 请求体提取 messages 与工具名。
-//
-// 预算从最新消息向前分配：先保住最后一轮（当前用户输入与最近的工具调用），
-// 预算不足时省略更早的历史，并返回 Omitted 条数。每条消息保留完整 JSON 字段
-// （tool_calls / tool_call_id / reasoning_content 等），只对超长 content 做截断。
-func Capture(body []byte, maxChars int) CaptureResult {
-	var req struct {
-		Messages []map[string]any `json:"messages"`
-		Tools    []struct {
-			Name     string `json:"name"`
-			Function struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		} `json:"tools"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
-		return CaptureResult{}
-	}
-	if maxChars <= 0 {
-		maxChars = defaultMaxChars
-	}
-
-	var tools []string
-	seen := make(map[string]bool)
-	for _, t := range req.Tools {
-		name := t.Name
-		if name == "" {
-			name = t.Function.Name
-		}
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		tools = append(tools, name)
-		if len(tools) >= 200 {
-			break
-		}
-	}
-
-	selected := make(map[int]Message, len(req.Messages))
-	used := 0
-	truncated := false
-
-	// 头部：首条 system/developer + 首条 user（原始任务），最多占 40% 预算。
-	// 单条消息时直接用满预算，避免只截到 40%。
-	headBudget := maxChars * 2 / 5
-	if len(req.Messages) == 1 {
-		headBudget = maxChars
-	}
-	headUsed := 0
-	headIdx := make([]int, 0, 2)
-	for i, m := range req.Messages {
-		role, _ := m["role"].(string)
-		if role == "system" || role == "developer" {
-			headIdx = append(headIdx, i)
-			break
-		}
-	}
-	for i, m := range req.Messages {
-		role, _ := m["role"].(string)
-		if role == "user" {
-			if len(headIdx) == 0 || headIdx[len(headIdx)-1] != i {
-				headIdx = append(headIdx, i)
-			}
-			break
-		}
-	}
-	for _, i := range headIdx {
-		remaining := headBudget - headUsed
-		if remaining <= 0 {
-			break
-		}
-		msg, size, cut, ok := fitMessage(req.Messages[i], remaining)
-		if !ok {
-			continue
-		}
-		selected[i] = msg
-		headUsed += size
-		truncated = truncated || cut
-	}
-	used = headUsed
-
-	// 尾部：从最新往前填满剩余预算（当前一轮与最近工具调用）。
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if _, ok := selected[i]; ok {
-			continue
-		}
-		remaining := maxChars - used
-		if remaining <= 0 {
-			break
-		}
-		msg, size, cut, ok := fitMessage(req.Messages[i], remaining)
-		if !ok {
-			break
-		}
-		selected[i] = msg
-		used += size
-		truncated = truncated || cut
-	}
-
-	out := make([]Message, 0, len(selected))
-	for i := 0; i < len(req.Messages); i++ {
-		if m, ok := selected[i]; ok {
-			out = append(out, m)
-		}
-	}
-	return CaptureResult{
-		Messages: out, Omitted: len(req.Messages) - len(out),
-		Tools: tools, Truncated: truncated, Bytes: used,
-	}
-}
-
-// flattenContent 把字符串/多模态数组压成可读文本，避免整条大消息被占位符丢掉。
-// 图片等非文本 part 保留为 [图片] 标记；其他类型返回 ok=false 走原始 JSON。
-func flattenContent(v any) (string, bool) {
-	switch c := v.(type) {
-	case string:
-		return c, true
-	case []any:
-		parts := make([]string, 0, len(c))
-		for _, p := range c {
-			switch part := p.(type) {
-			case string:
-				parts = append(parts, part)
-			case map[string]any:
-				typ, _ := part["type"].(string)
-				switch typ {
-				case "text", "input_text":
-					if t, ok := part["text"].(string); ok {
-						parts = append(parts, t)
-					}
-				case "image_url", "image", "input_image":
-					parts = append(parts, "[图片]")
-				default:
-					if t, ok := part["text"].(string); ok {
-						parts = append(parts, t)
-					} else {
-						parts = append(parts, "["+typ+"]")
-					}
-				}
-			}
-		}
-		return strings.Join(parts, "\n"), true
-	}
-	return "", false
-}
-
-// fitMessage 把单条消息裁到 cap 字节内；content 为字符串时优先保留前缀。
-func fitMessage(m map[string]any, cap int) (Message, int, bool, bool) {
-	if cap <= 0 {
-		return nil, 0, false, false
-	}
-	cp := make(map[string]any, len(m))
-	for k, v := range m {
-		cp[k] = v
-	}
-	cut := false
-	if s, ok := flattenContent(cp["content"]); ok {
-		runes := []rune(s)
-		limit := maxMessageRunes
-		if limit > cap {
-			limit = cap
-		}
-		if len(runes) > limit {
-			runes = runes[:limit]
-			cut = true
-		}
-		cp["content"] = string(runes)
-	} else if c, exists := cp["content"]; exists && c != nil {
-		raw, _ := json.Marshal(c)
-		if len(raw) > cap {
-			cp["content"] = fmt.Sprintf("[内容过大，已省略 %d 字节]", len(raw))
-			cut = true
-		}
-	}
-	raw, err := json.Marshal(cp)
-	if err != nil {
-		return nil, 0, false, false
-	}
-	if len(raw) > cap {
-		if s, ok := cp["content"].(string); ok {
-			runes := []rune(s)
-			for len(raw) > cap && len(runes) > 0 {
-				runes = runes[:len(runes)*3/4]
-				cp["content"] = string(runes)
-				cut = true
-				raw, _ = json.Marshal(cp)
-			}
-		}
-	}
-	if len(raw) > cap {
-		return nil, 0, false, false
-	}
-	return Message(cp), len(raw), cut, true
 }
 
 // Record 追加一条记录；失败返回错误（调用方只记日志，不影响请求）。

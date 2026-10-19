@@ -1725,6 +1725,7 @@ let keyUsageId = '';
 let keyUsageData = [];
 let keyPromptId = '';
 let keyPromptData = [];
+let keyPromptLoadSeq = 0;
 
 function maskKey(k) {
   if (!k) return '—';
@@ -1962,46 +1963,38 @@ function openKeyPrompts(k) {
   keyPromptId = k.id;
   $('keyPromptTitle').textContent = '输入提示词 · ' + (k.name || k.id);
   $('keyPromptBox').hidden = false;
+  keyPromptData = [];
   loadKeyPrompts();
 }
-// annotateFresh 标记“本轮新增”的用户消息：同一对话的工具续跑会重复携带历史，
-// 只有第一次出现的 user 内容才算新增；超过 10 分钟视为新会话，重新计数。
-function annotateFresh(entries) {
-  const seen = new Set();
-  const chrono = entries.slice().reverse();
-  let prev = 0;
-  for (const e of chrono) {
-    const t = Date.parse(e.time) || 0;
-    if (prev && t - prev > 10 * 60 * 1000) seen.clear();
-    const fresh = [];
-    for (const m of e.messages || []) {
-      const k = JSON.stringify(m.content);
-      if (!seen.has(k)) { fresh.push(m); seen.add(k); }
-    }
-    e._fresh = fresh;
-    prev = t;
-  }
-}
-
 async function loadKeyPrompts() {
   if (!keyPromptId) return;
-  const scope = $('keyPromptScope').value;
-  const apiRole = scope === 'fresh' ? 'real' : scope;
-  const q = '?limit=50' + (scope === 'all' ? '' : '&role=' + apiRole);
+  const id = keyPromptId, scope = $('keyPromptScope').value, seq = ++keyPromptLoadSeq;
+  const q = '?limit=50' + (scope === 'all' ? '' : '&role=' + scope);
+  const current = () => seq === keyPromptLoadSeq && id === keyPromptId && scope === $('keyPromptScope').value;
+  keyPromptData = [];
+  $('keyPromptList').textContent = '读取中…';
+  $('keyPromptNote').textContent = '';
+  $('btnKeyPromptClear').disabled = true;
   try {
-    const d = await api('keys/' + encodeURIComponent(keyPromptId) + '/prompts' + q);
+    const d = await api('keys/' + encodeURIComponent(id) + '/prompts' + q);
+    if (!current()) return;
     keyPromptData = d.entries || [];
-    if (scope === 'fresh') annotateFresh(keyPromptData);
     if (scope === 'fresh') {
-      const n = keyPromptData.filter(e => (e._fresh || []).length).length;
+      const n = keyPromptData.filter(e => e.fresh_state === 'new').length;
+      const unknown = keyPromptData.filter(e => e.fresh_state === 'unknown').length;
       $('keyPromptNote').textContent = keyPromptData.length
-        ? keyPromptData.length + ' 条请求 · ' + n + ' 条有新增输入'
+        ? keyPromptData.length + ' 条请求 · ' + n + ' 条有新增输入' + (unknown ? ' · ' + unknown + ' 条无法判定' : '')
         : '暂无记录';
     } else {
       $('keyPromptNote').textContent = keyPromptData.length ? keyPromptData.length + ' 条（新→旧）' : '暂无记录';
     }
     renderKeyPrompts();
-  } catch (e) { toast('读取提示词失败：' + e.message, 'err'); }
+    $('btnKeyPromptClear').disabled = false;
+  } catch (e) {
+    if (!current()) return;
+    $('keyPromptList').textContent = '读取失败，请刷新重试。';
+    toast('读取提示词失败：' + e.message, 'err');
+  }
 }
 function fmtPromptContent(c) {
   if (typeof c === 'string') return c;
@@ -2011,15 +2004,15 @@ function renderKeyPrompts() {
   const el = $('keyPromptList');
   const scope = $('keyPromptScope').value;
   const useFresh = scope === 'fresh';
-  const rows = useFresh ? keyPromptData.filter(e => (e._fresh || []).length) : keyPromptData;
+  const rows = useFresh ? keyPromptData.filter(e => e.fresh_state === 'new' || e.fresh_state === 'unknown') : keyPromptData;
   if (!rows.length) {
     el.innerHTML = useFresh
-      ? '<div class="empty">这些请求都没有新增的用户输入（都是同一对话的工具续跑/上下文）。切到「真实输入（含历史）」可以看完整历史。</div>'
+      ? '<div class="empty">这些请求未发现新增用户输入。可切到「真实输入（含历史）」核对归档内容。</div>'
       : '<div class="empty">该 key 暂无提示词记录。若总开关与 key 开关都已开启，通常只是还没有新的 chat 请求（/v1/models 不计）；也可能是请求发生在开启之前。</div>';
     return;
   }
   el.innerHTML = rows.map(e => {
-    const all = useFresh ? (e._fresh || []) : (e.messages || []);
+    const all = e.messages || [];
     const msgs = all.map(m => {
       const extra = Object.fromEntries(Object.entries(m).filter(([k]) => k !== 'role' && k !== 'content'));
       const extraHtml = Object.keys(extra).length
@@ -2029,10 +2022,10 @@ function renderKeyPrompts() {
       return '<div style="margin-top:6px"><span class="tag">' + esc(m.role || '?') + '</span>' +
         '<pre style="white-space:pre-wrap;word-break:break-word;margin:4px 0 0;font-size:12px;line-height:1.5">' + esc(fmtPromptContent(m.content)) + '</pre>' + extraHtml + '</div>';
     }).join('');
-    const omitted = e.omitted ? ' · 省略较早 ' + e.omitted + ' 条' : '';
+    const omitted = e.omitted ? ' · 省略 ' + e.omitted + ' 条' : '';
     const tools = (e.tools && e.tools.length) ? ' · 工具 ' + e.tools.length + ' 个' : '';
     const userCount = all.filter(m => m.role === 'user').length;
-    const scopeLabel = useFresh ? '本轮新增 ' + all.length + ' 条'
+    const scopeLabel = useFresh ? (e.fresh_state === 'unknown' ? '新增无法判定 · 已捕获输入 ' + all.length + ' 条' : '本轮新增 ' + all.length + ' 条')
       : scope === 'real' ? '真实输入 ' + all.length + ' 条'
       : scope === 'user' ? 'user ' + all.length + ' 条'
       : 'user ' + userCount + ' 条';
@@ -2043,18 +2036,29 @@ function renderKeyPrompts() {
       : '';
     return '<div style="border:1px solid var(--line, #333);border-radius:8px;padding:10px 12px;margin-bottom:10px">' +
       '<div class="note">' + fmtWhen(e.time) + ' · ' + esc(e.model || '—') + ' · HTTP ' + esc(String(e.status || 0)) + ' · ' + esc(e.request_id || '') + ' · ' + scopeLabel + omitted + tools + (e.truncated ? ' · <b>已截断</b>' : '') + '</div>' +
+      (useFresh && e.fresh_state === 'unknown' ? '<div class="note" style="margin-top:6px">' + esc(promptFreshReason(e.fresh_reason)) + '</div>' : '') +
       (msgs || noUser) + '</div>';
   }).join('');
 }
+function promptFreshReason(reason) {
+  return ({ legacy: '旧记录缺少会话及原始消息身份，显示已捕获输入供核对。',
+    no_session: '请求没有可用的会话身份，显示已捕获输入供核对。',
+    window_start: '这是查询窗口内该会话的首条请求，无法区分已有历史与本轮输入。',
+    history_changed: '会话历史发生压缩或回退，无法可靠判断新增。',
+    metadata_incomplete: '原始消息身份信息超出上限，无法可靠判断新增。' })[reason] || '无法可靠判断新增，显示已捕获输入供核对。';
+}
 $('keyPromptScope').onchange = loadKeyPrompts;
 $('btnKeyPromptRefresh').onclick = loadKeyPrompts;
-$('btnKeyPromptClose').onclick = () => { $('keyPromptBox').hidden = true; keyPromptId = ''; };
+$('btnKeyPromptClose').onclick = () => { ++keyPromptLoadSeq; $('keyPromptBox').hidden = true; keyPromptId = ''; keyPromptData = []; };
 $('btnKeyPromptClear').onclick = async () => {
+  const id = keyPromptId;
+  if (!id) return;
   if (!confirm('清空该 key 的全部提示词记录？')) return;
   try {
-    const r = await api('keys/' + encodeURIComponent(keyPromptId) + '/prompts/clear', { method: 'POST' });
+    const r = await api('keys/' + encodeURIComponent(id) + '/prompts/clear', { method: 'POST' });
     toast('已清空 ' + (r.removed || 0) + ' 条', 'ok');
-    await loadKeyPrompts();
+    if (id === keyPromptId) await loadKeyPrompts();
+    await loadKeys();
   } catch (e) { toast('清空失败：' + e.message, 'err'); }
 };
 

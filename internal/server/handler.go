@@ -45,7 +45,7 @@ type Config struct {
 	KeyStats *keystats.Recorder
 	// PromptLog 输入提示词归档（nil = 未启用）。
 	PromptLog *promptlog.Recorder
-	// PromptMaxChars 单请求捕获字符上限（<=0 回落 20000）。
+	// PromptMaxChars 单请求捕获字符上限（<=0 回落 100000）。
 	PromptMaxChars int
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
@@ -239,7 +239,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.cfg.KeyStats.Record(trace.keyID, model, status, pt, ct)
 			}
 			// 提示词归档：在出口记录，才能带上最终状态码与改写后的模型名。
-			if h.cfg.PromptLog != nil && trace.keyID != "" && len(trace.promptMessages) > 0 {
+			if h.cfg.PromptLog != nil && trace.keyID != "" && (len(trace.promptCapture.Messages) > 0 || len(trace.promptCapture.Inputs) > 0) {
 				model := trace.model
 				if trace.stat != nil && trace.stat.model != "" {
 					model = trace.stat.model
@@ -247,9 +247,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if err := h.cfg.PromptLog.Record(promptlog.Entry{
 					Time: trace.start, KeyID: trace.keyID, KeyName: trace.keyName,
 					RequestID: trace.id, Model: model, Status: status,
-					Messages: trace.promptMessages, Omitted: trace.promptOmitted,
-					Tools: trace.promptTools, Truncated: trace.promptTruncated,
-					Bytes: trace.promptBytes,
+					Version: promptlog.CaptureVersion, SessionHash: trace.promptSessionHash,
+					MessageIndexes: trace.promptCapture.MessageIndexes, Inputs: trace.promptCapture.Inputs,
+					InputsOmitted: trace.promptCapture.InputsOmitted, OriginalMessages: trace.promptCapture.OriginalMessages,
+					Messages: trace.promptCapture.Messages, Omitted: trace.promptCapture.Omitted,
+					Tools: trace.promptCapture.Tools, Truncated: trace.promptCapture.Truncated,
+					Bytes: trace.promptCapture.Bytes,
 				}); err != nil {
 					log.Printf("[promptlog] record: %v", err)
 				}
@@ -747,12 +750,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 提示词归档：只在该 key 显式开启时抓取（模型被拒的请求也保留，便于审计）。
 	if h.cfg.PromptLog != nil && policyFrom(r).CapturePrompts {
 		if tr := requestTraceFrom(r); tr != nil {
-			res := promptlog.Capture(body, h.cfg.PromptMaxChars)
-			tr.promptMessages = res.Messages
-			tr.promptOmitted = res.Omitted
-			tr.promptTools = res.Tools
-			tr.promptTruncated = res.Truncated
-			tr.promptBytes = res.Bytes
+			tr.promptCapture = promptlog.Capture(body, h.cfg.PromptMaxChars)
+			tr.promptSessionHash = tr.promptCapture.SessionHash
 			tr.model = peek.Model
 		}
 	}
