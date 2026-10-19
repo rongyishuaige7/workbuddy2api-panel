@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/keystats"
 )
 
 func TestKeysCRUD(t *testing.T) {
@@ -100,5 +102,45 @@ func TestNewAPIKeyAndCleanModels(t *testing.T) {
 	got := cleanModels([]string{" a ", "", "a", "b"})
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Fatalf("cleanModels=%v", got)
+	}
+}
+
+func TestKeyUsageAndOrphanPrune(t *testing.T) {
+	stats := keystats.New("")
+	stats.Record("k1", "model-a", 200, 10, 5)
+	stats.Record("orphan", "model-b", 200, 1, 1)
+	saved := []APIKeyView{{ID: "k1", Name: "friend", Key: "sk-1"}}
+	p := New(Config{
+		APIKey:   "panel-key",
+		KeyStats: stats,
+		ListAPIKeys: func() ([]APIKeyView, error) {
+			return saved, nil
+		},
+		SaveAPIKeys: func(k []APIKeyView) error { saved = k; return nil },
+	})
+	do := func(method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer panel-key")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := do(http.MethodGet, "/panel/api/keys/k1/usage?days=7")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "model-a") {
+		t.Fatalf("usage code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(http.MethodGet, "/panel/api/keys")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"orphan_count":1`) {
+		t.Fatalf("list code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(http.MethodPost, "/panel/api/keys/prune_stats")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"removed":1`) {
+		t.Fatalf("prune code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := stats.Snapshot()["orphan"]; ok {
+		t.Fatal("orphan stats should be pruned")
 	}
 }

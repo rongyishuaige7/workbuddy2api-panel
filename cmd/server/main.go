@@ -315,7 +315,7 @@ func main() {
 			for _, k := range c.APIKeys {
 				out = append(out, panel.APIKeyView{
 					ID: k.ID, Name: k.Name, Key: k.Key,
-					Models: k.Models, RPM: k.RPM, Disabled: k.Disabled,
+					Models: k.Models, RPM: k.RPM, DailyTokens: k.DailyTokens, Disabled: k.Disabled,
 				})
 			}
 			return out, nil
@@ -325,7 +325,7 @@ func main() {
 			for _, k := range keys {
 				arr = append(arr, map[string]any{
 					"id": k.ID, "name": k.Name, "key": k.Key,
-					"models": k.Models, "rpm": k.RPM, "disabled": k.Disabled,
+					"models": k.Models, "rpm": k.RPM, "daily_tokens": k.DailyTokens, "disabled": k.Disabled,
 				})
 			}
 			raw, err := json.Marshal(map[string]any{"api_keys": arr})
@@ -680,7 +680,7 @@ func apiKeyPolicies(cfg *Config) []httpauth.Policy {
 	for _, k := range cfg.APIKeys {
 		out = append(out, httpauth.Policy{
 			ID: k.ID, Key: k.Key, Name: k.Name,
-			Models: k.Models, RPM: k.RPM, Disabled: k.Disabled,
+			Models: k.Models, RPM: k.RPM, DailyTokens: k.DailyTokens, Disabled: k.Disabled,
 		})
 	}
 	return out

@@ -916,3 +916,16 @@ func TestAPIKeyConfigIDAndRPM(t *testing.T) {
 		t.Error("重复 id 必须 fail fast")
 	}
 }
+
+func TestAPIKeyDailyTokensValidation(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"api_keys":[{"key":"sk-x","daily_tokens":1234}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.APIKeys[0].DailyTokens != 1234 {
+		t.Fatalf("daily_tokens=%d", c.APIKeys[0].DailyTokens)
+	}
+	if _, err := ParseConfig([]byte(`{"api_keys":[{"key":"sk-x","daily_tokens":-1}]}`)); err == nil {
+		t.Error("负 daily_tokens 必须 fail fast")
+	}
+}

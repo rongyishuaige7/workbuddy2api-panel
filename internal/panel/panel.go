@@ -207,6 +207,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/keys/{id}/toggle", p.withAuth(p.toggleKey))
 	p.mux.HandleFunc("POST /panel/api/keys/{id}/rotate", p.withAuth(p.rotateKey))
 	p.mux.HandleFunc("POST /panel/api/keys/{id}/remove", p.withAuth(p.removeKey))
+	p.mux.HandleFunc("GET /panel/api/keys/{id}/usage", p.withAuth(p.keyUsage))
+	p.mux.HandleFunc("POST /panel/api/keys/prune_stats", p.withAuth(p.pruneKeyStats))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

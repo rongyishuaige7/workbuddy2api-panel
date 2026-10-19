@@ -946,6 +946,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <header>
           <h3>API 密钥</h3>
           <span class="grow"></span>
+          <span class="note" id="keysOrphan"></span>
+          <button class="xs" id="btnKeysPrune" hidden>清理孤儿统计</button>
           <span class="note" id="keysNote">—</span>
           <button class="xs" id="btnKeysRefresh">刷新</button>
           <button class="primary xs" id="btnKeyNew">新建密钥</button>
@@ -953,7 +955,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="tbl-wrap">
           <table class="acc zebra">
             <thead><tr>
-              <th>名称</th><th>密钥</th><th>模型限制</th><th>限速</th><th>状态</th>
+              <th>名称</th><th>密钥</th><th>模型限制</th><th>限速</th><th>日 Token 配额</th><th>状态</th>
               <th>今日请求</th><th>今日 Token</th><th>累计请求</th><th>累计 Token</th><th>错误</th><th>最近使用</th><th>操作</th>
             </tr></thead>
             <tbody id="keysBody"></tbody>
@@ -964,11 +966,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="box" id="keyFormBox" hidden>
         <header><h3 id="keyFormTitle">新建密钥</h3><span class="grow"></span><span class="note" id="keyFormNote"></span></header>
         <div class="pad">
+          <label class="fld"><span class="lb">名称</span>
+            <input id="keyName" maxlength="64" placeholder="朋友A"></label>
           <div class="grid2">
-            <label class="fld"><span class="lb">名称</span>
-              <input id="keyName" maxlength="64" placeholder="朋友A"></label>
             <label class="fld"><span class="lb">限速（RPM，0 = 不限）</span>
               <input id="keyRpm" type="number" min="0" placeholder="0"></label>
+            <label class="fld"><span class="lb">日 Token 配额（0 = 不限）</span>
+              <input id="keyDaily" type="number" min="0" placeholder="0"></label>
           </div>
           <label class="fld"><span class="lb">允许的模型（逗号分隔，留空 = 全部）</span>
             <input id="keyModels" placeholder="global:deepseek-v4.1-flash"></label>
@@ -977,6 +981,31 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <div class="inline" style="margin-top:12px">
             <button class="primary" id="btnKeySave">保存</button>
             <button id="btnKeyCancel">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="box" id="keyUsageBox" hidden>
+        <header>
+          <h3 id="keyUsageTitle">用量</h3>
+          <span class="grow"></span>
+          <span class="note">蓝 prompt · 紫 completion</span>
+          <label class="sel-note">范围
+            <select id="keyUsageDays">
+              <option value="7">近 7 天</option>
+              <option value="30" selected>近 30 天</option>
+              <option value="90">近 90 天</option>
+            </select>
+          </label>
+          <button class="xs" id="btnKeyUsageClose">关闭</button>
+        </header>
+        <div class="pad">
+          <div id="keyUsageChart" style="width:100%;height:180px"></div>
+          <div class="tbl-wrap" style="margin-top:12px">
+            <table class="acc zebra">
+              <thead><tr><th>模型</th><th>请求</th><th>Prompt</th><th>Completion</th><th>合计</th></tr></thead>
+              <tbody id="keyUsageModels"></tbody>
+            </table>
           </div>
         </div>
       </div>

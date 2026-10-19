@@ -1703,6 +1703,8 @@ $('cfgForm').onsubmit = async ev => {
 /* ── API 密钥 ─────────────────────────────────────────────────────── */
 let keysCache = [];
 let keyEditId = '';
+let keyUsageId = '';
+let keyUsageData = [];
 
 function maskKey(k) {
   if (!k) return '—';
@@ -1720,6 +1722,9 @@ async function loadKeys() {
   try {
     const d = await api('keys');
     keysCache = d.keys || [];
+    const orphans = Number(d.orphan_count || 0);
+    $('keysOrphan').textContent = orphans ? orphans + ' 条孤儿统计' : '';
+    $('btnKeysPrune').hidden = !orphans;
     $('keysNote').textContent = keysCache.length ? keysCache.length + ' 把密钥' : '暂无附加密钥';
     renderKeys();
   } catch (e) { toast('读取密钥失败：' + e.message, 'err'); }
@@ -1728,7 +1733,7 @@ async function loadKeys() {
 function renderKeys() {
   const tb = $('keysBody');
   if (!keysCache.length) {
-    tb.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="big">还没有附加密钥</div>点右上角「新建密钥」给他人发放一把。</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="13"><div class="empty"><div class="big">还没有附加密钥</div>点右上角「新建密钥」给他人发放一把。</div></td></tr>';
     return;
   }
   tb.innerHTML = keysCache.map(k => {
@@ -1745,6 +1750,7 @@ function renderKeys() {
         '<button class="xs" data-act="copy">复制</button></td>' +
       '<td>' + models + '</td>' +
       '<td>' + (k.rpm ? esc(String(k.rpm)) + ' rpm' : '<span class="note">不限</span>') + '</td>' +
+      '<td>' + (k.daily_tokens ? fmtNum(k.daily_tokens) : '<span class="note">不限</span>') + '</td>' +
       '<td>' + state + '</td>' +
       '<td>' + fmtNum(st.today_requests) + '</td>' +
       '<td>' + fmtNum(st.today_tokens) + '</td>' +
@@ -1753,6 +1759,7 @@ function renderKeys() {
       '<td>' + fmtNum(st.errors) + '</td>' +
       '<td>' + fmtWhen(st.last_used) + '</td>' +
       '<td class="acts">' +
+        '<button class="xs" data-act="usage">用量</button>' +
         '<button class="xs" data-act="edit">编辑</button>' +
         '<button class="xs" data-act="toggle">' + (k.disabled ? '启用' : '禁用') + '</button>' +
         '<button class="xs" data-act="rotate">轮换</button>' +
@@ -1766,6 +1773,7 @@ function openKeyForm(k) {
   $('keyFormTitle').textContent = k ? '编辑密钥' : '新建密钥';
   $('keyName').value = k ? (k.name || '') : '';
   $('keyRpm').value = k && k.rpm ? String(k.rpm) : '';
+  $('keyDaily').value = k && k.daily_tokens ? String(k.daily_tokens) : '';
   $('keyModels').value = k && k.models ? k.models.join(', ') : '';
   $('keyEnabled').checked = k ? !k.disabled : true;
   $('keyFormNote').textContent = k ? k.id : '保存后生成新密钥，创建时会自动复制';
@@ -1789,6 +1797,7 @@ $('keysBody').addEventListener('click', async ev => {
       return;
     }
     if (act === 'copy') { await copyText(k.key); toast('密钥已复制', 'ok'); return; }
+    if (act === 'usage') { openKeyUsage(k); return; }
     if (act === 'edit') { openKeyForm(k); return; }
     if (act === 'toggle') {
       await api('keys/' + encodeURIComponent(k.id) + '/toggle', { method: 'POST' });
@@ -1818,11 +1827,16 @@ $('btnKeySave').onclick = async () => {
   if (!Number.isFinite(rpm) || rpm < 0 || !Number.isInteger(rpm)) {
     toast('RPM 必须是非负整数', 'err'); return;
   }
+  const daily = Number($('keyDaily').value || 0);
+  if (!Number.isFinite(daily) || daily < 0 || !Number.isInteger(daily)) {
+    toast('日 Token 配额必须是非负整数', 'err'); return;
+  }
   const body = {
     id: keyEditId,
     name: $('keyName').value.trim(),
     models: $('keyModels').value.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean),
     rpm: rpm,
+    daily_tokens: daily,
     disabled: !$('keyEnabled').checked,
   };
   try {
@@ -1832,6 +1846,81 @@ $('btnKeySave').onclick = async () => {
     $('keyFormBox').hidden = true;
     await loadKeys();
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
+};
+
+/* 用量曲线与孤儿统计 */
+function openKeyUsage(k) {
+  keyUsageId = k.id;
+  $('keyUsageTitle').textContent = '用量 · ' + (k.name || k.id);
+  $('keyUsageBox').hidden = false;
+  loadKeyUsage();
+}
+async function loadKeyUsage() {
+  if (!keyUsageId) return;
+  const days = Number($('keyUsageDays').value || 30);
+  try {
+    const d = await api('keys/' + encodeURIComponent(keyUsageId) + '/usage?days=' + days);
+    keyUsageData = d.days || [];
+    renderKeyUsageChart();
+    renderKeyUsageModels();
+  } catch (e) { toast('读取用量失败：' + e.message, 'err'); }
+}
+function renderKeyUsageChart() {
+  const el = $('keyUsageChart');
+  const days = keyUsageData;
+  if (!days.length) { el.innerHTML = ''; return; }
+  const W = 600, H = 180, padL = 46, padR = 8, padT = 12, padB = 26;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const max = Math.max(1, ...days.map(d => Number(d.prompt_tokens || 0) + Number(d.completion_tokens || 0)));
+  const bw = innerW / days.length;
+  const gap = Math.min(4, bw * 0.2);
+  let bars = '';
+  days.forEach((d, i) => {
+    const p = Number(d.prompt_tokens || 0), c = Number(d.completion_tokens || 0);
+    const x = padL + i * bw + gap / 2;
+    const w = Math.max(1, bw - gap);
+    const hp = (p / max) * innerH, hc = (c / max) * innerH;
+    const yc = padT + innerH - hc, yp = yc - hp;
+    if (hp > 0) bars += '<rect x="' + x + '" y="' + yp + '" width="' + w + '" height="' + hp + '" fill="#5b8def"><title>' + esc(d.day) + ' · prompt ' + p + '</title></rect>';
+    if (hc > 0) bars += '<rect x="' + x + '" y="' + yc + '" width="' + w + '" height="' + hc + '" fill="#9b8cff"><title>' + esc(d.day) + ' · completion ' + c + '</title></rect>';
+  });
+  const y0 = padT + innerH;
+  const first = days[0].day, last = days[days.length - 1].day;
+  el.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:100%">' +
+    '<line x1="' + padL + '" y1="' + y0 + '" x2="' + (W - padR) + '" y2="' + y0 + '" stroke="currentColor" stroke-opacity=".25"/>' +
+    '<text x="' + (padL - 6) + '" y="' + (padT + 8) + '" text-anchor="end" font-size="10" fill="currentColor" fill-opacity=".55">' + fmtNum(max) + '</text>' +
+    '<text x="' + (padL - 6) + '" y="' + y0 + '" text-anchor="end" font-size="10" fill="currentColor" fill-opacity=".55">0</text>' +
+    '<text x="' + padL + '" y="' + (H - 8) + '" font-size="10" fill="currentColor" fill-opacity=".55">' + esc(first) + '</text>' +
+    '<text x="' + (W - padR) + '" y="' + (H - 8) + '" text-anchor="end" font-size="10" fill="currentColor" fill-opacity=".55">' + esc(last) + '</text>' +
+    bars + '</svg>';
+}
+function renderKeyUsageModels() {
+  const agg = new Map();
+  for (const d of keyUsageData) {
+    for (const [m, v] of Object.entries(d.models || {})) {
+      const a = agg.get(m) || { requests: 0, prompt: 0, completion: 0 };
+      a.requests += Number(v.requests || 0);
+      a.prompt += Number(v.prompt_tokens || 0);
+      a.completion += Number(v.completion_tokens || 0);
+      agg.set(m, a);
+    }
+  }
+  const rows = [...agg.entries()].sort((a, b) => (b[1].prompt + b[1].completion) - (a[1].prompt + a[1].completion));
+  const tb = $('keyUsageModels');
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty">该时段没有用量</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(([m, a]) => '<tr><td><code>' + esc(m) + '</code></td><td>' + fmtNum(a.requests) + '</td><td>' + fmtNum(a.prompt) + '</td><td>' + fmtNum(a.completion) + '</td><td>' + fmtNum(a.prompt + a.completion) + '</td></tr>').join('');
+}
+$('keyUsageDays').onchange = loadKeyUsage;
+$('btnKeyUsageClose').onclick = () => { $('keyUsageBox').hidden = true; keyUsageId = ''; };
+$('btnKeysPrune').onclick = async () => {
+  try {
+    const r = await api('keys/prune_stats', { method: 'POST' });
+    toast('已清理 ' + (r.removed || 0) + ' 条孤儿统计', 'ok');
+    await loadKeys();
+  } catch (e) { toast('清理失败：' + e.message, 'err'); }
 };
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */

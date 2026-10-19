@@ -226,10 +226,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// 已记账并置 statsDone，避免重复计数。
 			if h.cfg.KeyStats != nil && trace.keyID != "" && !trace.statsDone {
 				var pt, ct int64
+				model := ""
 				if trace.stat != nil {
 					pt, ct = trace.stat.promptTokens, trace.stat.completionTokens
+					model = trace.stat.model
 				}
-				h.cfg.KeyStats.Record(trace.keyID, status, pt, ct)
+				h.cfg.KeyStats.Record(trace.keyID, model, status, pt, ct)
 			}
 		}()
 		h.mux.ServeHTTP(obs, r)
@@ -263,6 +265,17 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeOpenAIError(w, http.StatusForbidden, "key_disabled", "this API key is disabled")
 			return
 		}
+		// 日 token 配额：只对 chat 判定（其它端点不消耗 token）；软上限，单请求
+		// 可能略微超出，下一次请求即被拒绝。
+		if pol.DailyTokens > 0 && h.cfg.KeyStats != nil && r.URL.Path == "/v1/chat/completions" {
+			if used := h.cfg.KeyStats.TodayTokens(pol.ID); used >= pol.DailyTokens {
+				w.Header().Set("Retry-After", strconv.Itoa(secondsUntilMidnight()))
+				h.noteKeyRejected(r, pol, http.StatusTooManyRequests)
+				writeOpenAIError(w, http.StatusTooManyRequests, "token_quota_exceeded",
+					fmt.Sprintf("daily token quota exceeded (%d/%d)", used, pol.DailyTokens))
+				return
+			}
+		}
 		if h.cfg.RateLimit != nil {
 			if ok, retry := h.cfg.RateLimit.Allow(pol.ID, pol.RPM); !ok {
 				secs := int(math.Ceil(retry.Seconds()))
@@ -291,7 +304,7 @@ func (h *Handler) noteKeyRejected(r *http.Request, pol httpauth.Policy, status i
 	if h.cfg.KeyStats == nil || pol.ID == "" {
 		return
 	}
-	h.cfg.KeyStats.Record(pol.ID, status, 0, 0)
+	h.cfg.KeyStats.Record(pol.ID, "", status, 0, 0)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.statsDone = true
 	}
@@ -303,8 +316,19 @@ func (h *Handler) recordKeyRequest(r *http.Request, status int) {
 		return
 	}
 	if pol := policyFrom(r); pol.ID != "" {
-		h.cfg.KeyStats.Record(pol.ID, status, 0, 0)
+		h.cfg.KeyStats.Record(pol.ID, "", status, 0, 0)
 	}
+}
+
+// secondsUntilMidnight 返回距本地次日 00:00 的秒数（日配额重置的 Retry-After）。
+func secondsUntilMidnight() int {
+	now := time.Now()
+	next := time.Date(now.Year(), now.Month(), now.Day(), 24, 0, 0, 0, now.Location())
+	secs := int(time.Until(next).Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	return secs
 }
 
 // v1NotFound 兜底 /v1/* 未实现端点：给客户端可读的 OpenAI 风格错误。

@@ -22,12 +22,13 @@ import (
 // api_key 仍是拥有者密钥（不限模型、可用于 /status）；本列表用于给他人发放
 // 受限密钥：models 非空时该 key 只能调用列出的模型，/v1/models 也只返回这些模型。
 type APIKeyConfig struct {
-	ID       string   `json:"id"`       // 稳定标识；空则由 key 派生（轮换 key 时面板会保留原 ID）
-	Name     string   `json:"name"`     // 备注，便于排障
-	Key      string   `json:"key"`      // 密钥原文
-	Models   []string `json:"models"`   // 允许的模型 id；空 = 不限
-	RPM      int      `json:"rpm"`      // 每分钟请求上限；0 = 不限
-	Disabled bool     `json:"disabled"` // 禁用后返回 403 key_disabled（不删除配置，便于随时恢复）
+	ID          string   `json:"id"`           // 稳定标识；空则由 key 派生（轮换 key 时面板会保留原 ID）
+	Name        string   `json:"name"`         // 备注，便于排障
+	Key         string   `json:"key"`          // 密钥原文
+	Models      []string `json:"models"`       // 允许的模型 id；空 = 不限
+	RPM         int      `json:"rpm"`          // 每分钟请求上限；0 = 不限
+	DailyTokens int64    `json:"daily_tokens"` // 每日 token 上限；0 = 不限
+	Disabled    bool     `json:"disabled"`     // 禁用后返回 403 key_disabled（不删除配置，便于随时恢复）
 }
 
 // deriveKeyID 由密钥值派生稳定 ID（旧配置没有 id 时使用）。
@@ -530,6 +531,9 @@ func (c *Config) normalizeAPIKeys() error {
 		ids[k.ID] = i
 		if k.RPM < 0 {
 			return fmt.Errorf("api_keys[%d].rpm: 不能为负", i)
+		}
+		if k.DailyTokens < 0 {
+			return fmt.Errorf("api_keys[%d].daily_tokens: 不能为负", i)
 		}
 		for j := range k.Models {
 			k.Models[j] = strings.TrimSpace(k.Models[j])
