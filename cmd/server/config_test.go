@@ -872,3 +872,30 @@ func TestPanelAPIKeyConfig(t *testing.T) {
 		t.Errorf("api_key=%q panel.api_key=%q", c.APIKey, c.Panel.APIKey)
 	}
 }
+
+func TestAPIKeysConfig(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"api_key":"a","api_keys":[{"key":" b ","name":" friend ","models":[" global:deepseek-v4.1-flash "]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.APIKeys) != 1 {
+		t.Fatalf("api_keys len=%d", len(c.APIKeys))
+	}
+	k := c.APIKeys[0]
+	if k.Key != "b" || k.Name != "friend" || len(k.Models) != 1 || k.Models[0] != "global:deepseek-v4.1-flash" {
+		t.Errorf("api_keys[0]=%+v", k)
+	}
+	if len(k.Models) == 1 && k.Models[0] != "global:deepseek-v4.1-flash" {
+		t.Errorf("models[0]=%q", k.Models[0])
+	}
+
+	if _, err := ParseConfig([]byte(`{"api_key":"a","api_keys":[{"key":"a"}]}`)); err == nil {
+		t.Error("与拥有者密钥重复必须 fail fast")
+	}
+	if _, err := ParseConfig([]byte(`{"api_keys":[{"key":" "}]}`)); err == nil {
+		t.Error("空 key 必须 fail fast")
+	}
+	if _, err := ParseConfig([]byte(`{"api_keys":[{"key":"x"},{"key":"x"}]}`)); err == nil {
+		t.Error("附加密钥之间重复必须 fail fast")
+	}
+}

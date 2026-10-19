@@ -11,18 +11,21 @@ package livecfg
 import (
 	"sync/atomic"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 )
 
 // Snapshot 一次读取的不可变配置视图。
 type Snapshot struct {
-	APIKey               string        // 网关（/v1、/status）鉴权密钥；空 = 不鉴权
-	PanelAPIKey          string        // 面板独立鉴权密钥；空 = 回落 APIKey
-	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
-	GlobalSoftCooldown   time.Duration // global 域 429/14003 冷却基数（0 = 不冷却）
-	GlobalWafCooldown    time.Duration // global 域 WAF 403 冷却基数（0 = 不冷却）
-	Global6004Cooldown   time.Duration // global 域 6004 模型锁本地上限（0 = 不冷却）
-	SanitizeFingerprints bool          // 出站请求体指纹脱敏
-	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
+	APIKey               string            // 网关（/v1、/status）鉴权密钥；空 = 不鉴权
+	PanelAPIKey          string            // 面板独立鉴权密钥；空 = 回落 APIKey
+	APIKeys              []httpauth.Policy // 附加下游密钥（可带模型白名单）；空 = 仅 APIKey
+	SoftCooldown         time.Duration     // 429 软冷却基数（<=0 时调用方回退内置默认）
+	GlobalSoftCooldown   time.Duration     // global 域 429/14003 冷却基数（0 = 不冷却）
+	GlobalWafCooldown    time.Duration     // global 域 WAF 403 冷却基数（0 = 不冷却）
+	Global6004Cooldown   time.Duration     // global 域 6004 模型锁本地上限（0 = 不冷却）
+	SanitizeFingerprints bool              // 出站请求体指纹脱敏
+	RecordClientInfo     bool              // 请求日志是否记录调用来源（客户端 IP / UA）
 }
 
 // Holder 原子持有当前快照。

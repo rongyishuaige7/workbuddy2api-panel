@@ -15,12 +15,26 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
 
+// APIKeyConfig 一把附加下游 API 密钥。
+//
+// api_key 仍是拥有者密钥（不限模型、可用于 /status）；本列表用于给他人发放
+// 受限密钥：models 非空时该 key 只能调用列出的模型，/v1/models 也只返回这些模型。
+type APIKeyConfig struct {
+	Key    string   `json:"key"`
+	Name   string   `json:"name"`   // 备注，便于排障
+	Models []string `json:"models"` // 允许的模型 id；空 = 不限
+}
+
 // Config 顶层配置。
 type Config struct {
 	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	APIKey    string `json:"api_key"`    // 拥有者密钥；空 = 不鉴权（与 api_keys 都空时）
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+
+	// APIKeys 附加下游密钥（可带模型白名单）。与顶层 api_key 共同构成有效密钥集；
+	// 两者都为空才表示不鉴权。
+	APIKeys []APIKeyConfig `json:"api_keys"`
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -475,8 +489,39 @@ func applyEnv(c *Config) {
 	}
 }
 
+// normalizeAPIKeys 去空白并 fail-fast 校验：空 key、与拥有者密钥重复、附加密钥之间
+// 重复，都视为配置错误（重复会让「命中哪一把」取决于遍历顺序，排障时不可复现）。
+func (c *Config) normalizeAPIKeys() error {
+	seen := make(map[string]string, len(c.APIKeys)+1)
+	if c.APIKey != "" {
+		seen[c.APIKey] = "api_key"
+	}
+	for i := range c.APIKeys {
+		k := &c.APIKeys[i]
+		k.Key = strings.TrimSpace(k.Key)
+		k.Name = strings.TrimSpace(k.Name)
+		if k.Key == "" {
+			return fmt.Errorf("api_keys[%d].key: 不能为空", i)
+		}
+		if prev, dup := seen[k.Key]; dup {
+			return fmt.Errorf("api_keys[%d].key: 与 %s 重复", i, prev)
+		}
+		seen[k.Key] = fmt.Sprintf("api_keys[%d]", i)
+		for j := range k.Models {
+			k.Models[j] = strings.TrimSpace(k.Models[j])
+			if k.Models[j] == "" {
+				return fmt.Errorf("api_keys[%d].models[%d]: 不能为空", i, j)
+			}
+		}
+	}
+	return nil
+}
+
 func (c *Config) normalize() error {
 	var err error
+	if err := c.normalizeAPIKeys(); err != nil {
+		return err
+	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}

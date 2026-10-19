@@ -357,6 +357,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `listen` | `:7863` | HTTP 监听地址 |
 | `api_key` | 空 | 网关鉴权密钥（`/v1/*`、`/status`）；**空 = 不鉴权直接放行**（公网必须设置） |
 | `panel.api_key` | 空 | 面板独立鉴权密钥（`/panel/api/*`）；空 = 回落 `api_key`。与 `api_key` 分开后，把 `api_key` 发给他人只授予调用权，不附带删号/改配置的管理权 |
+| `api_keys` | `[]` | 附加下游密钥数组，每项 `{name,key,models}`；`models` 非空时该 key 只能调用列出的模型，`/v1/models` 也只返回这些模型，`/status` 不开放。`api_key` 始终是拥有者密钥（不限模型）。示例：`[{"name":"朋友","key":"sk-...","models":["global:deepseek-v4.1-flash"]}]` |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
@@ -705,7 +706,8 @@ http://127.0.0.1:7863/panel/
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
-> 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
+> 鉴权规则：有效密钥集 = 顶层 `api_key`（拥有者，不限模型）+ `api_keys` 数组（可带模型白名单）。两者都为空时上述端点直接放行；`/healthz` 恒无鉴权。
+> 受限密钥（`models` 非空）调用白名单外模型返回 403 `model_not_allowed`，`/v1/models` 只返回白名单内模型，`/status` 返回 403。
 
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 

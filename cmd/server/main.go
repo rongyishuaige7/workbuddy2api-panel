@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -235,6 +236,7 @@ func main() {
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
 		PanelAPIKey:          cfg.Panel.APIKey,
+		APIKeys:              apiKeyPolicies(cfg),
 		SoftCooldown:         cfg.SoftRateDur,
 		GlobalSoftCooldown:   cfg.GlobalSoftRateDur,
 		GlobalWafCooldown:    cfg.GlobalWafRateDur,
@@ -499,6 +501,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
 		PanelAPIKey:          newCfg.Panel.APIKey,
+		APIKeys:              apiKeyPolicies(newCfg),
 		SoftCooldown:         newCfg.SoftRateDur,
 		GlobalSoftCooldown:   newCfg.GlobalSoftRateDur,
 		GlobalWafCooldown:    newCfg.GlobalWafRateDur,
@@ -622,6 +625,19 @@ func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
 		cur[k] = v
 	}
 	return cur
+}
+
+// apiKeyPolicies 把配置里的附加密钥转成鉴权包使用的策略视图。
+// 浅拷贝切片即可：配置加载后不再原地修改。
+func apiKeyPolicies(cfg *Config) []httpauth.Policy {
+	if cfg == nil || len(cfg.APIKeys) == 0 {
+		return nil
+	}
+	out := make([]httpauth.Policy, 0, len(cfg.APIKeys))
+	for _, k := range cfg.APIKeys {
+		out = append(out, httpauth.Policy{Key: k.Key, Name: k.Name, Models: k.Models})
+	}
+	return out
 }
 
 // mergedJSON 把合并后的 map 序列化回 JSON（供 ParseConfig 校验）。

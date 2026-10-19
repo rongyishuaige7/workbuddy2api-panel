@@ -213,13 +213,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// apiKeyPolicyKey 请求上下文里的密钥策略（withAuth 写入，各 handler 读取）。
+type apiKeyPolicyKey struct{}
+
+// policyFrom 返回当前请求命中的密钥策略；未经过 withAuth（如单测直调）时为零值，
+// 零值 Unrestricted()=true，等价于不限制。
+func policyFrom(r *http.Request) httpauth.Policy {
+	if p, ok := r.Context().Value(apiKeyPolicyKey{}).(httpauth.Policy); ok {
+		return p
+	}
+	return httpauth.Policy{}
+}
+
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+		s := h.loadLive()
+		pol, ok := httpauth.Resolve(r, s.APIKey, s.APIKeys)
+		if !ok {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(context.WithValue(r.Context(), apiKeyPolicyKey{}, pol)))
 	}
 }
 
@@ -248,6 +262,12 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
+	// 账号池状态（积分/冷却/粘性）属于管理视图：受限密钥（带模型白名单）不开放，
+	// 避免「给他人一把只能调某个模型的 key」却顺带泄露全部账号状态。
+	if pol := policyFrom(r); !pol.Unrestricted() {
+		writeOpenAIError(w, http.StatusForbidden, "forbidden", "status requires an unrestricted API key")
+		return
+	}
 	total, healthy, cooling, disabled, inFlightFull := h.cfg.Pool.CountsDetailed()
 	sticky := 0
 	if h.cfg.StickyCount != nil {
@@ -324,8 +344,24 @@ const (
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   filterModelList(h.modelList(), policyFrom(r)),
 	})
+}
+
+// filterModelList 按密钥的模型白名单过滤 /v1/models：受限密钥只看到自己能用的
+// 模型（客户端据此选模型，不会先选到再被 403）。
+func filterModelList(data []map[string]any, pol httpauth.Policy) []map[string]any {
+	if pol.Unrestricted() {
+		return data
+	}
+	out := make([]map[string]any, 0, len(data))
+	for _, e := range data {
+		id, _ := e["id"].(string)
+		if pol.AllowsModel(id) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // fmtCreditsPrefix 从上游 credits 原文提取倍率并格式化为 "[x0.05 credit]"。
@@ -569,6 +605,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+
+	// 密钥级模型白名单：在选号/改写/出站之前拒绝，避免受限密钥触发任何上游调用。
+	// 空 model 无法核验，对受限密钥同样拒绝。
+	if pol := policyFrom(r); !pol.AllowsModel(peek.Model) {
+		writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+			fmt.Sprintf("model %q is not allowed for this API key", peek.Model))
+		return
+	}
 
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
 	// （见 upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」

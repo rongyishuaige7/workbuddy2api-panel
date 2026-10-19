@@ -1530,6 +1530,7 @@ $('btnLogPin').onclick = () => {
 const CFG_MAP = {
   listen: ['listen'], api_key: ['api_key'],
   panel_api_key: ['panel', 'api_key'],
+  api_keys_json: ['api_keys'],
   package_detail_limit: ['panel', 'package_detail_limit'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
@@ -1590,6 +1591,7 @@ async function loadConfig() {
       const el = f.elements[name];
       if (!el) continue;
       const v = dig(cfgLoaded, path);
+      if (name === 'api_keys_json') { el.value = JSON.stringify(v ?? [], null, 2); continue; }
       if (el.type === 'checkbox') el.checked = !!v;
       else if (Array.isArray(v)) el.value = v.join(', ');
       else el.value = v == null ? '' : v;
@@ -1603,6 +1605,15 @@ function collectConfig() {
   for (const [name, path] of Object.entries(CFG_MAP)) {
     const el = f.elements[name];
     if (!el) continue;
+    if (name === 'api_keys_json') {
+      const raw = el.value.trim();
+      if (raw === '') { put(out, path, []); continue; }
+      let arr;
+      try { arr = JSON.parse(raw); } catch { throw new Error('附加 API 密钥不是合法 JSON'); }
+      if (!Array.isArray(arr)) throw new Error('附加 API 密钥必须是 JSON 数组');
+      put(out, path, arr);
+      continue;
+    }
     let v;
     if (el.type === 'checkbox') v = el.checked;
     else if (el.type === 'number') { v = el.value.trim() === '' ? undefined : Number(el.value); }

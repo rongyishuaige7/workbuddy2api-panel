@@ -59,3 +59,57 @@ func TestDigestIsFixedLength(t *testing.T) {
 		t.Errorf("sha256 digest length = %d, want 32", len(digest("x")))
 	}
 }
+
+func TestPolicyAllowsModel(t *testing.T) {
+	all := Policy{}
+	if !all.Unrestricted() || !all.AllowsModel("cn:glm-5.2") {
+		t.Error("空 Models 应视为不限模型")
+	}
+	restricted := Policy{Models: []string{"global:deepseek-v4.1-flash"}}
+	if restricted.Unrestricted() {
+		t.Error("带 Models 不应是 unrestricted")
+	}
+	if !restricted.AllowsModel("global:deepseek-v4.1-flash") {
+		t.Error("白名单模型应放行")
+	}
+	if restricted.AllowsModel("cn:glm-5.2") {
+		t.Error("白名单外模型必须拒绝")
+	}
+}
+
+func TestResolve(t *testing.T) {
+	friend := Policy{Key: "sk-friend", Name: "friend", Models: []string{"global:deepseek-v4.1-flash"}}
+	cases := []struct {
+		name      string
+		authz     string
+		ownerKey  string
+		keys      []Policy
+		wantOK    bool
+		wantName  string
+		wantModel string
+	}{
+		{"未启用鉴权", "", "", nil, true, "", ""},
+		{"拥有者密钥", "Bearer sk-owner", "sk-owner", []Policy{friend}, true, "owner", ""},
+		{"附加受限密钥", "Bearer sk-friend", "sk-owner", []Policy{friend}, true, "friend", "global:deepseek-v4.1-flash"},
+		{"错误密钥", "Bearer sk-wrong", "sk-owner", []Policy{friend}, false, "", ""},
+		{"只有附加密钥时缺头", "", "", []Policy{friend}, false, "", ""},
+		{"只有附加密钥时命中", "Bearer sk-friend", "", []Policy{friend}, true, "friend", "global:deepseek-v4.1-flash"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pol, ok := Resolve(req(c.authz), c.ownerKey, c.keys)
+			if ok != c.wantOK {
+				t.Fatalf("ok=%v want %v", ok, c.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if pol.Name != c.wantName {
+				t.Errorf("name=%q want %q", pol.Name, c.wantName)
+			}
+			if c.wantModel != "" && !pol.AllowsModel(c.wantModel) {
+				t.Errorf("policy should allow %q", c.wantModel)
+			}
+		})
+	}
+}
