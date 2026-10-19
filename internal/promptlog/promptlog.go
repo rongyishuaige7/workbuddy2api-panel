@@ -109,6 +109,10 @@ var harnessPrefixes = []string{
 	"Use only names in this replacement catalog",
 	"A user may also invoke a skill directly",
 	"Skills load from",
+	"Attached image(s) from tool result",
+	"Attached image",
+	"Attached file",
+	"交付状态:",
 }
 
 // IsHarnessContext 判断一段 user 内容是否是 harness 注入的上下文/通知。

@@ -189,6 +189,8 @@ func TestIsHarnessContext(t *testing.T) {
 		"background job pwsh-123 (pwsh: ...)",
 		"Instructions from: ~/.dsh/AGENTS.md",
 		"Current working directory: /x",
+		"Attached image(s) from tool result:\n[图片]",
+		"交付状态: COMMITTED_AND_PUSHED",
 	}
 	for _, s := range yes {
 		if !IsHarnessContext(s) {

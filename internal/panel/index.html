@@ -1020,7 +1020,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="keyPromptNote"></span>
           <label class="sel-note">范围
             <select id="keyPromptScope">
-              <option value="real" selected>只看真实输入</option>
+              <option value="fresh" selected>本轮新增</option>
+              <option value="real">真实输入（含历史）</option>
               <option value="user">只看 user</option>
               <option value="all">全部消息</option>
             </select>
@@ -1029,7 +1030,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs danger" id="btnKeyPromptClear">清空该 key 记录</button>
           <button class="xs" id="btnKeyPromptClose">关闭</button>
         </header>
-        <div class="pad" id="keyPromptList"></div>
+        <div class="pad">
+          <div class="hint" style="margin-bottom:8px">每条记录 = 一次请求；同一对话的工具续跑会重复携带历史，默认只显示本轮新增的用户输入。</div>
+          <div id="keyPromptList"></div>
+        </div>
       </div>
     </section>
 

@@ -1964,14 +1964,42 @@ function openKeyPrompts(k) {
   $('keyPromptBox').hidden = false;
   loadKeyPrompts();
 }
+// annotateFresh 标记“本轮新增”的用户消息：同一对话的工具续跑会重复携带历史，
+// 只有第一次出现的 user 内容才算新增；超过 10 分钟视为新会话，重新计数。
+function annotateFresh(entries) {
+  const seen = new Set();
+  const chrono = entries.slice().reverse();
+  let prev = 0;
+  for (const e of chrono) {
+    const t = Date.parse(e.time) || 0;
+    if (prev && t - prev > 10 * 60 * 1000) seen.clear();
+    const fresh = [];
+    for (const m of e.messages || []) {
+      const k = JSON.stringify(m.content);
+      if (!seen.has(k)) { fresh.push(m); seen.add(k); }
+    }
+    e._fresh = fresh;
+    prev = t;
+  }
+}
+
 async function loadKeyPrompts() {
   if (!keyPromptId) return;
   const scope = $('keyPromptScope').value;
-  const q = '?limit=50' + (scope === 'all' ? '' : '&role=' + scope);
+  const apiRole = scope === 'fresh' ? 'real' : scope;
+  const q = '?limit=50' + (scope === 'all' ? '' : '&role=' + apiRole);
   try {
     const d = await api('keys/' + encodeURIComponent(keyPromptId) + '/prompts' + q);
     keyPromptData = d.entries || [];
-    $('keyPromptNote').textContent = keyPromptData.length ? keyPromptData.length + ' 条（新→旧）' : '暂无记录';
+    if (scope === 'fresh') annotateFresh(keyPromptData);
+    if (scope === 'fresh') {
+      const n = keyPromptData.filter(e => (e._fresh || []).length).length;
+      $('keyPromptNote').textContent = keyPromptData.length
+        ? keyPromptData.length + ' 条请求 · ' + n + ' 条有新增输入'
+        : '暂无记录';
+    } else {
+      $('keyPromptNote').textContent = keyPromptData.length ? keyPromptData.length + ' 条（新→旧）' : '暂无记录';
+    }
     renderKeyPrompts();
   } catch (e) { toast('读取提示词失败：' + e.message, 'err'); }
 }
@@ -1982,12 +2010,16 @@ function fmtPromptContent(c) {
 function renderKeyPrompts() {
   const el = $('keyPromptList');
   const scope = $('keyPromptScope').value;
-  if (!keyPromptData.length) {
-    el.innerHTML = '<div class="empty">该 key 暂无提示词记录。若总开关与 key 开关都已开启，通常只是还没有新的 chat 请求（/v1/models 不计）；也可能是请求发生在开启之前。</div>';
+  const useFresh = scope === 'fresh';
+  const rows = useFresh ? keyPromptData.filter(e => (e._fresh || []).length) : keyPromptData;
+  if (!rows.length) {
+    el.innerHTML = useFresh
+      ? '<div class="empty">这些请求都没有新增的用户输入（都是同一对话的工具续跑/上下文）。切到「真实输入（含历史）」可以看完整历史。</div>'
+      : '<div class="empty">该 key 暂无提示词记录。若总开关与 key 开关都已开启，通常只是还没有新的 chat 请求（/v1/models 不计）；也可能是请求发生在开启之前。</div>';
     return;
   }
-  el.innerHTML = keyPromptData.map(e => {
-    const all = e.messages || [];
+  el.innerHTML = rows.map(e => {
+    const all = useFresh ? (e._fresh || []) : (e.messages || []);
     const msgs = all.map(m => {
       const extra = Object.fromEntries(Object.entries(m).filter(([k]) => k !== 'role' && k !== 'content'));
       const extraHtml = Object.keys(extra).length
@@ -2000,10 +2032,11 @@ function renderKeyPrompts() {
     const omitted = e.omitted ? ' · 省略较早 ' + e.omitted + ' 条' : '';
     const tools = (e.tools && e.tools.length) ? ' · 工具 ' + e.tools.length + ' 个' : '';
     const userCount = all.filter(m => m.role === 'user').length;
-    const scopeLabel = scope === 'real' ? '真实输入 ' + all.length + ' 条'
+    const scopeLabel = useFresh ? '本轮新增 ' + all.length + ' 条'
+      : scope === 'real' ? '真实输入 ' + all.length + ' 条'
       : scope === 'user' ? 'user ' + all.length + ' 条'
       : 'user ' + userCount + ' 条';
-    const noUser = scope !== 'all' && !all.length
+    const noUser = !useFresh && scope !== 'all' && !all.length
       ? '<div class="note" style="margin-top:6px">' + (scope === 'real'
           ? '该请求没有真实用户输入（多为上下文/工具续跑）；可切到「全部消息」查看。'
           : '该请求没有 user 消息；可切到「全部消息」查看。') + '</div>'
