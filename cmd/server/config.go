@@ -575,10 +575,10 @@ func (c *Config) normalize() error {
 		c.Logging.PromptRetentionDays = 3
 	}
 	if c.Logging.PromptMaxMB <= 0 {
-		c.Logging.PromptMaxMB = 50
+		c.Logging.PromptMaxMB = 100
 	}
 	if c.Logging.PromptMaxChars <= 0 {
-		c.Logging.PromptMaxChars = 20000
+		c.Logging.PromptMaxChars = 100000
 	}
 	// 入站读取上限（issue #100）：空值回落默认 300s；"0" 合法（不限制）；
 	// 负值无语义，fail fast（静默钳 0 会把保护悄悄关掉）。

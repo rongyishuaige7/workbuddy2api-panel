@@ -9,52 +9,95 @@ import (
 	"time"
 )
 
-func TestCapture(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"},{"role":"user","content":[{"type":"text","text":"img"}]}]}`)
-	msgs, truncated, bytes := Capture(body, 1000)
-	if len(msgs) != 3 || truncated || bytes == 0 {
-		t.Fatalf("msgs=%d truncated=%v bytes=%d", len(msgs), truncated, bytes)
+func TestCaptureKeepsFullFieldsAndTools(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"messages": []any{
+			map[string]any{"role": "developer", "content": "sys"},
+			map[string]any{"role": "user", "content": "hello"},
+			map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+				map[string]any{"id": "call_1", "type": "function", "function": map[string]any{"name": "read_file", "arguments": `{"path":"a"}`}},
+			}},
+			map[string]any{"role": "tool", "tool_call_id": "call_1", "content": "file-body"},
+		},
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "write_file"}},
+		},
+	})
+	res := Capture(body, 1000)
+	if len(res.Messages) != 4 {
+		t.Fatalf("messages=%d", len(res.Messages))
 	}
-	if msgs[1].Content != "hello" {
-		t.Fatalf("content=%v", msgs[1].Content)
+	if res.Messages[1]["content"] != "hello" {
+		t.Fatalf("content=%v", res.Messages[1]["content"])
 	}
-	raw, _ := json.Marshal(msgs[2].Content)
-	if !strings.Contains(string(raw), `"type":"text"`) {
-		t.Fatalf("array content lost: %s", raw)
+	if _, ok := res.Messages[2]["tool_calls"]; !ok {
+		t.Fatal("tool_calls must be preserved")
+	}
+	if res.Messages[3]["tool_call_id"] != "call_1" {
+		t.Fatalf("tool_call_id=%v", res.Messages[3]["tool_call_id"])
+	}
+	if len(res.Tools) != 2 || res.Tools[0] != "read_file" || res.Tools[1] != "write_file" {
+		t.Fatalf("tools=%v", res.Tools)
+	}
+}
+
+func TestCaptureTailFirstAndOmitted(t *testing.T) {
+	msgs := make([]any, 0, 6)
+	for i := 1; i <= 6; i++ {
+		msgs = append(msgs, map[string]any{"role": "user", "content": strings.Repeat("x", 100) + "-" + string(rune('0'+i))})
+	}
+	body, _ := json.Marshal(map[string]any{"messages": msgs})
+	res := Capture(body, 250)
+	if len(res.Messages) == 0 || res.Omitted == 0 {
+		t.Fatalf("messages=%d omitted=%d", len(res.Messages), res.Omitted)
+	}
+	last := res.Messages[len(res.Messages)-1]["content"].(string)
+	if !strings.HasSuffix(last, "-6") {
+		t.Fatalf("newest message should be kept, last=%q", last)
+	}
+	if len(res.Messages)+res.Omitted != 6 {
+		t.Fatalf("messages=%d omitted=%d", len(res.Messages), res.Omitted)
+	}
+}
+
+func TestCaptureTruncatesLongContent(t *testing.T) {
+	big := strings.Repeat("中", 30000)
+	body, _ := json.Marshal(map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": big},
+	}})
+	res := Capture(body, 1000)
+	if len(res.Messages) != 1 || !res.Truncated {
+		t.Fatalf("messages=%d truncated=%v", len(res.Messages), res.Truncated)
+	}
+	s, _ := res.Messages[0]["content"].(string)
+	if len([]rune(s)) > 1000 {
+		t.Fatalf("content runes=%d", len([]rune(s)))
 	}
 
-	big := strings.Repeat("x", 30000)
-	msgs, truncated, _ = Capture([]byte(`{"messages":[{"role":"user","content":"`+big+`"}]}`), 1000)
-	if len(msgs) != 1 || !truncated {
-		t.Fatalf("truncate: msgs=%d truncated=%v", len(msgs), truncated)
-	}
-	if s, ok := msgs[0].Content.(string); !ok || len([]rune(s)) > 1000 {
-		t.Fatalf("truncated content len=%d", len([]rune(msgs[0].Content.(string))))
-	}
-
-	if m, _, _ := Capture([]byte(`{}`), 1000); m != nil {
+	if r := Capture([]byte(`{}`), 1000); r.Messages != nil {
 		t.Fatal("no messages should capture nothing")
 	}
-	if m, _, _ := Capture([]byte(`not-json`), 1000); m != nil {
+	if r := Capture([]byte(`not-json`), 1000); r.Messages != nil {
 		t.Fatal("invalid json should capture nothing")
 	}
 }
 
-func TestRecordListClear(t *testing.T) {
+func TestRecordListClearPrune(t *testing.T) {
 	dir := t.TempDir()
 	r := New(Config{Dir: dir, RetentionDays: 3, MaxBytes: 1 << 20})
 	now := time.Now()
-	if err := r.Record(Entry{Time: now, KeyID: "k1", KeyName: "a", Model: "m", Status: 200, Messages: []Message{{Role: "user", Content: "one"}}}); err != nil {
+	if err := r.Record(Entry{Time: now, KeyID: "k1", KeyName: "a", Model: "m", Status: 200, Messages: []Message{{"role": "user", "content": "one"}}}); err != nil {
 		t.Fatal(err)
 	}
-	_ = r.Record(Entry{Time: now, KeyID: "k1", KeyName: "a", Model: "m", Status: 200, Messages: []Message{{Role: "user", Content: "two"}}})
-	_ = r.Record(Entry{Time: now, KeyID: "k2", KeyName: "b", Model: "m", Status: 200, Messages: []Message{{Role: "user", Content: "other"}}})
+	_ = r.Record(Entry{Time: now, KeyID: "k1", KeyName: "a", Model: "m", Status: 200, Messages: []Message{{"role": "user", "content": "two"}}})
+	_ = r.Record(Entry{Time: now, KeyID: "k2", KeyName: "b", Model: "m", Status: 200, Messages: []Message{{"role": "user", "content": "other"}}})
 
 	list, err := r.List("k1", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 2 || list[0].Messages[0].Content != "two" {
+	if len(list) != 2 || list[0].Messages[0]["content"] != "two" {
 		t.Fatalf("list=%+v", list)
 	}
 	n, err := r.Clear("k1")
@@ -66,6 +109,14 @@ func TestRecordListClear(t *testing.T) {
 	}
 	if list, _ := r.List("k2", 10); len(list) != 1 {
 		t.Fatalf("k2 should survive: %d", len(list))
+	}
+
+	removed, err := r.Prune(map[string]bool{"k1": true})
+	if err != nil || removed != 1 {
+		t.Fatalf("prune removed=%d err=%v", removed, err)
+	}
+	if list, _ := r.List("k2", 10); len(list) != 0 {
+		t.Fatalf("k2 should be pruned: %d", len(list))
 	}
 	r.Close()
 }
@@ -82,5 +133,30 @@ func TestPruneRetention(t *testing.T) {
 	r.mu.Unlock()
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Fatal("old prompt log should be pruned")
+	}
+}
+
+func TestCaptureHeadAndTail(t *testing.T) {
+	msgs := []any{
+		map[string]any{"role": "system", "content": "SYS"},
+		map[string]any{"role": "user", "content": "ORIGINAL-TASK"},
+	}
+	for i := 0; i < 10; i++ {
+		msgs = append(msgs, map[string]any{"role": "tool", "content": strings.Repeat("y", 200) + "-" + string(rune('0'+i))})
+	}
+	msgs = append(msgs, map[string]any{"role": "user", "content": "LATEST"})
+	body, _ := json.Marshal(map[string]any{"messages": msgs})
+	res := Capture(body, 800)
+	if res.Omitted == 0 {
+		t.Fatalf("middle messages should be omitted, messages=%d", len(res.Messages))
+	}
+	joined := ""
+	for _, m := range res.Messages {
+		if s, ok := m["content"].(string); ok {
+			joined += s + "\n"
+		}
+	}
+	if !strings.Contains(joined, "ORIGINAL-TASK") || !strings.Contains(joined, "LATEST") {
+		t.Fatalf("head and tail must both survive, got %q", joined)
 	}
 }

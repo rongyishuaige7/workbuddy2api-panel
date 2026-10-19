@@ -1561,6 +1561,7 @@ const CFG_MAP = {
   prompt_capture_enabled: ['logging', 'prompt_capture_enabled'],
   prompt_retention_days: ['logging', 'prompt_retention_days'],
   prompt_max_mb: ['logging', 'prompt_max_mb'],
+  prompt_max_chars: ['logging', 'prompt_max_chars'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -1925,6 +1926,13 @@ function renderKeyUsageModels() {
 }
 $('keyUsageDays').onchange = loadKeyUsage;
 $('btnKeyUsageClose').onclick = () => { $('keyUsageBox').hidden = true; keyUsageId = ''; };
+$('btnPromptsPrune').onclick = async () => {
+  if (!confirm('清理已删除 key 的提示词记录？当前配置中的 key 不受影响。')) return;
+  try {
+    const r = await api('prompts/prune', { method: 'POST' });
+    toast('已清理 ' + (r.removed || 0) + ' 条已删除 key 的提示词', 'ok');
+  } catch (e) { toast('清理失败：' + e.message, 'err'); }
+};
 $('btnKeysPrune').onclick = async () => {
   try {
     const r = await api('keys/prune_stats', { method: 'POST' });
@@ -1961,10 +1969,19 @@ function renderKeyPrompts() {
     return;
   }
   el.innerHTML = keyPromptData.map(e => {
-    const msgs = (e.messages || []).map(m => '<div style="margin-top:6px"><span class="tag">' + esc(m.role || '?') + '</span>' +
-      '<pre style="white-space:pre-wrap;word-break:break-word;margin:4px 0 0;font-size:12px;line-height:1.5">' + esc(fmtPromptContent(m.content)) + '</pre></div>').join('');
+    const msgs = (e.messages || []).map(m => {
+      const extra = Object.fromEntries(Object.entries(m).filter(([k]) => k !== 'role' && k !== 'content'));
+      const extraHtml = Object.keys(extra).length
+        ? '<details style="margin-top:4px"><summary class="note">其他字段（tool_calls 等）</summary>' +
+          '<pre style="white-space:pre-wrap;word-break:break-word;margin:4px 0 0;font-size:12px;line-height:1.5">' + esc(JSON.stringify(extra, null, 2)) + '</pre></details>'
+        : '';
+      return '<div style="margin-top:6px"><span class="tag">' + esc(m.role || '?') + '</span>' +
+        '<pre style="white-space:pre-wrap;word-break:break-word;margin:4px 0 0;font-size:12px;line-height:1.5">' + esc(fmtPromptContent(m.content)) + '</pre>' + extraHtml + '</div>';
+    }).join('');
+    const omitted = e.omitted ? ' · 省略较早 ' + e.omitted + ' 条' : '';
+    const tools = (e.tools && e.tools.length) ? ' · 工具 ' + e.tools.length + ' 个' : '';
     return '<div style="border:1px solid var(--line, #333);border-radius:8px;padding:10px 12px;margin-bottom:10px">' +
-      '<div class="note">' + fmtWhen(e.time) + ' · ' + esc(e.model || '—') + ' · HTTP ' + esc(String(e.status || 0)) + ' · ' + esc(e.request_id || '') + (e.truncated ? ' · <b>已截断</b>' : '') + '</div>' +
+      '<div class="note">' + fmtWhen(e.time) + ' · ' + esc(e.model || '—') + ' · HTTP ' + esc(String(e.status || 0)) + ' · ' + esc(e.request_id || '') + omitted + tools + (e.truncated ? ' · <b>已截断</b>' : '') + '</div>' +
       msgs + '</div>';
   }).join('');
 }

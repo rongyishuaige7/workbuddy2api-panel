@@ -367,8 +367,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
 | `logging.prompt_capture_enabled` | `false` | **输入提示词归档总开关（敏感）**；还需在具体 key 上设置 `capture_prompts=true`。改动需重启 |
 | `logging.prompt_retention_days` | `3` | 提示词归档保留天数；启动与每小时清理 |
-| `logging.prompt_max_mb` | `50` | 提示词归档总容量上限（MiB）；超限优先删除最旧文件 |
-| `logging.prompt_max_chars` | `20000` | 单请求捕获字符上限；单条消息另有 8000 字符上限，超出标记 truncated |
+| `logging.prompt_max_mb` | `100` | 提示词归档总容量上限（MiB）；超限优先删除最旧文件 |
+| `logging.prompt_max_chars` | `100000` | 单请求捕获字符上限；**头部保留首条 system/developer + 首条 user，尾部保留最新消息**，中间省略的消息数计入 `omitted`；单条消息另有 20000 字符上限 |
 | `cooldown.soft_rate` | `600s` | CN 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
 | `cooldown.global_soft_rate` | `10s` | global 域 429/14003 的账号级冷却基数；`0` = 不冷却 |
@@ -669,7 +669,7 @@ http://127.0.0.1:7863/panel/
 - **用量**：按密钥 ID 聚合今日 / 累计请求数、prompt / completion token、错误数、最近使用时间；今日计数按本地时区跨天归零。表格行内「用量」可展开**按天曲线**（prompt/completion 堆叠柱，7/30/90 天）与**按模型明细**。统计每 30s 落盘到 `data/key_usage.json`（与 `state_file` 同目录），重启后恢复；按天历史保留 90 天。
 - **模型白名单**：受限 key 调白名单外模型返回 `403 model_not_allowed`，`/v1/models` 只返回白名单内模型，`/status` 返回 403。
 - **孤儿统计**：删除/改名后残留的密钥统计会在表头显示条数，点「清理孤儿统计」一次性移除（保留 `owner` 与当前配置中的 key）。
-- **提示词归档（敏感）**：需同时满足「配置 → 日志 → 记录输入提示词」总开关打开（重启生效）与该 key 勾选「记录输入提示词」。开启后，每次 chat 请求的 `messages`（角色 + 内容）写入 `data/prompt-logs/prompts-YYYY-MM-DD.jsonl`；行内「提示词」可查看最近 50 条、按 key 清空。只记录输入，不含响应、Authorization 或 token；单条消息 8000 字符、单请求 `prompt_max_chars` 字符上限，超出标记 truncated；默认保留 3 天 / 50 MiB，启动与每小时自动清理。
+- **提示词归档（敏感）**：需同时满足「配置 → 日志 → 记录输入提示词」总开关打开（重启生效）与该 key 勾选「记录输入提示词」。开启后，每次 chat 请求的完整 `messages`（含 `tool_calls` / `tool_call_id` / `name` 等全部字段）与工具名写入 `data/prompt-logs/prompts-YYYY-MM-DD.jsonl`；预算采用**头尾双端**策略：头部保留首条 system/developer 与首条 user（原始任务），尾部保留最新消息（当前轮与最近工具调用），中间省略的消息数记在 `omitted`。行内「提示词」可查看最近 50 条、按 key 清空；表头「清理已删除 key 的提示词」清理已删 key 的残留。只记录输入，不含响应、Authorization、token 或工具 schema；单条消息 20000 字符、单请求 `prompt_max_chars` 字符上限，超出标记 truncated；默认保留 3 天 / 100 MiB，启动与每小时自动清理。
 
 > ⚠️ 提示词可能包含账号、密钥、个人隐私等敏感内容。只在确有审计需求的 key 上开启，控制 `panel.api_key` 的持有范围，并设置较短的 `prompt_retention_days`；不要对公网无鉴权开放面板。
 

@@ -14,7 +14,7 @@ func TestKeyPromptsEndpoints(t *testing.T) {
 	rec := promptlog.New(promptlog.Config{Dir: t.TempDir(), RetentionDays: 3, MaxBytes: 1 << 20})
 	if err := rec.Record(promptlog.Entry{
 		Time: time.Now(), KeyID: "k1", KeyName: "friend", Model: "global:deepseek-v4.1-flash", Status: 200,
-		Messages: []promptlog.Message{{Role: "user", Content: "hello-monitor"}},
+		Messages: []promptlog.Message{{"role": "user", "content": "hello-monitor"}},
 	}); err != nil {
 		t.Fatal(err)
 	}

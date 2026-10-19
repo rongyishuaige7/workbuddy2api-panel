@@ -361,6 +361,8 @@ type requestTrace struct {
 	statsDone bool
 	// 提示词归档（仅该 key 开启 capture_prompts 且全局开关打开时填充）。
 	promptMessages  []promptlog.Message
+	promptOmitted   int
+	promptTools     []string
 	promptTruncated bool
 	promptBytes     int
 	model           string

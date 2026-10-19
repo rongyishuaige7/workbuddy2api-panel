@@ -938,7 +938,7 @@ func TestPromptCaptureDefaults(t *testing.T) {
 	if c.Logging.PromptCaptureEnabled {
 		t.Error("prompt capture must default off")
 	}
-	if c.Logging.PromptRetentionDays != 3 || c.Logging.PromptMaxMB != 50 || c.Logging.PromptMaxChars != 20000 {
+	if c.Logging.PromptRetentionDays != 3 || c.Logging.PromptMaxMB != 100 || c.Logging.PromptMaxChars != 100000 {
 		t.Fatalf("logging=%+v", c.Logging)
 	}
 	c2, err := ParseConfig([]byte(`{"api_keys":[{"key":"sk-x","capture_prompts":true}]}`))

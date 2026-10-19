@@ -247,7 +247,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if err := h.cfg.PromptLog.Record(promptlog.Entry{
 					Time: trace.start, KeyID: trace.keyID, KeyName: trace.keyName,
 					RequestID: trace.id, Model: model, Status: status,
-					Messages: trace.promptMessages, Truncated: trace.promptTruncated,
+					Messages: trace.promptMessages, Omitted: trace.promptOmitted,
+					Tools: trace.promptTools, Truncated: trace.promptTruncated,
 					Bytes: trace.promptBytes,
 				}); err != nil {
 					log.Printf("[promptlog] record: %v", err)
@@ -746,8 +747,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 提示词归档：只在该 key 显式开启时抓取（模型被拒的请求也保留，便于审计）。
 	if h.cfg.PromptLog != nil && policyFrom(r).CapturePrompts {
 		if tr := requestTraceFrom(r); tr != nil {
-			msgs, truncated, bytes := promptlog.Capture(body, h.cfg.PromptMaxChars)
-			tr.promptMessages, tr.promptTruncated, tr.promptBytes = msgs, truncated, bytes
+			res := promptlog.Capture(body, h.cfg.PromptMaxChars)
+			tr.promptMessages = res.Messages
+			tr.promptOmitted = res.Omitted
+			tr.promptTools = res.Tools
+			tr.promptTruncated = res.Truncated
+			tr.promptBytes = res.Bytes
 			tr.model = peek.Model
 		}
 	}

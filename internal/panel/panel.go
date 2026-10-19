@@ -214,6 +214,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/keys/{id}/prompts", p.withAuth(p.keyPrompts))
 	p.mux.HandleFunc("POST /panel/api/keys/{id}/prompts/clear", p.withAuth(p.clearKeyPrompts))
 	p.mux.HandleFunc("POST /panel/api/keys/prune_stats", p.withAuth(p.pruneKeyStats))
+	p.mux.HandleFunc("POST /panel/api/prompts/prune", p.withAuth(p.prunePrompts))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

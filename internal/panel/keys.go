@@ -414,6 +414,29 @@ func (p *Panel) clearKeyPrompts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n})
 }
 
+// prunePrompts 清理已不在配置里的 key 的提示词记录。
+func (p *Panel) prunePrompts(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.PromptLog == nil || p.cfg.ListAPIKeys == nil {
+		writeErr(w, http.StatusNotImplemented, "prompt log not available")
+		return
+	}
+	keys, err := p.cfg.ListAPIKeys()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "list keys: "+err.Error())
+		return
+	}
+	valid := map[string]bool{"owner": true}
+	for _, k := range keys {
+		valid[k.ID] = true
+	}
+	n, err := p.cfg.PromptLog.Prune(valid)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "prune prompts: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": n})
+}
+
 // newAPIKey 生成 32 字符随机密钥（192 bit）。
 func newAPIKey() (string, error) {
 	buf := make([]byte, 24)

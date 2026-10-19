@@ -3,8 +3,9 @@
 // 隐私边界：
 //   - 只有全局 logging.prompt_capture_enabled 打开、且该 key 的 capture_prompts=true
 //     时才记录；
-//   - 只记录请求的 messages（角色 + 内容），不记录响应、Authorization、token；
-//   - 单条消息与单请求都有长度上限，超出标记 truncated；
+//   - 只记录请求的 messages（完整消息对象，含 tool_calls/tool_call_id 等）与工具名，
+//     不记录响应、Authorization、token、工具 schema；
+//   - 预算从最新消息往前分配（审计最关心最后一轮），单条/单请求都有上限；
 //   - 文件 0600、目录 0700，按天分文件，按保留天数/总容量自动清理。
 package promptlog
 
@@ -18,15 +19,10 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
-// Message 一条输入消息（content 可能是字符串或多模态数组）。
-type Message struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
-	Name    string `json:"name,omitempty"`
-}
+// Message 一条完整输入消息（保留 role/content/tool_calls/name 等全部字段）。
+type Message map[string]any
 
 // Entry 一次请求的提示词快照。
 type Entry struct {
@@ -37,8 +33,20 @@ type Entry struct {
 	Model     string    `json:"model"`
 	Status    int       `json:"status"`
 	Messages  []Message `json:"messages"`
-	Truncated bool      `json:"truncated"`
-	Bytes     int       `json:"bytes"`
+	// Omitted 因预算省略的较早消息条数；Tools 请求声明的工具名（不含 schema）。
+	Omitted   int      `json:"omitted,omitempty"`
+	Tools     []string `json:"tools,omitempty"`
+	Truncated bool     `json:"truncated"`
+	Bytes     int      `json:"bytes"`
+}
+
+// CaptureResult Capture 的返回。
+type CaptureResult struct {
+	Messages  []Message
+	Omitted   int
+	Tools     []string
+	Truncated bool
+	Bytes     int
 }
 
 // Config 归档配置。
@@ -62,9 +70,10 @@ type Recorder struct {
 }
 
 const (
-	maxMessageRunes = 8000
+	maxMessageRunes = 20000
 	defaultRetain   = 3
-	defaultMaxBytes = 50 << 20
+	defaultMaxBytes = 100 << 20
+	defaultMaxChars = 100000
 )
 
 // New 构建归档器；Dir 为空时 Record 为 no-op（面板仍可返回空列表）。
@@ -78,62 +87,165 @@ func New(cfg Config) *Recorder {
 	return &Recorder{cfg: cfg}
 }
 
-// Capture 从 chat 请求体提取 messages。返回消息、是否截断、捕获字节数。
-// maxChars<=0 时回落 20000。解析失败/无 messages 返回 nil。
-func Capture(body []byte, maxChars int) ([]Message, bool, int) {
+// Capture 从 chat 请求体提取 messages 与工具名。
+//
+// 预算从最新消息向前分配：先保住最后一轮（当前用户输入与最近的工具调用），
+// 预算不足时省略更早的历史，并返回 Omitted 条数。每条消息保留完整 JSON 字段
+// （tool_calls / tool_call_id / reasoning_content 等），只对超长 content 做截断。
+func Capture(body []byte, maxChars int) CaptureResult {
 	var req struct {
-		Messages []struct {
-			Role    string          `json:"role"`
-			Name    string          `json:"name"`
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
+		Messages []map[string]any `json:"messages"`
+		Tools    []struct {
+			Name     string `json:"name"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
-		return nil, false, 0
+		return CaptureResult{}
 	}
 	if maxChars <= 0 {
-		maxChars = 20000
+		maxChars = defaultMaxChars
 	}
-	out := make([]Message, 0, len(req.Messages))
-	total := 0
-	truncated := false
-	for _, m := range req.Messages {
-		remaining := maxChars - total
-		if remaining <= 0 {
-			truncated = true
+
+	var tools []string
+	seen := make(map[string]bool)
+	for _, t := range req.Tools {
+		name := t.Name
+		if name == "" {
+			name = t.Function.Name
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		tools = append(tools, name)
+		if len(tools) >= 200 {
 			break
 		}
-		var content any
-		size := 0
-		var s string
-		if err := json.Unmarshal(m.Content, &s); err == nil {
-			limit := maxMessageRunes
-			if limit > remaining {
-				limit = remaining
+	}
+
+	selected := make(map[int]Message, len(req.Messages))
+	used := 0
+	truncated := false
+
+	// 头部：首条 system/developer + 首条 user（原始任务），最多占 40% 预算。
+	// 单条消息时直接用满预算，避免只截到 40%。
+	headBudget := maxChars * 2 / 5
+	if len(req.Messages) == 1 {
+		headBudget = maxChars
+	}
+	headUsed := 0
+	headIdx := make([]int, 0, 2)
+	for i, m := range req.Messages {
+		role, _ := m["role"].(string)
+		if role == "system" || role == "developer" {
+			headIdx = append(headIdx, i)
+			break
+		}
+	}
+	for i, m := range req.Messages {
+		role, _ := m["role"].(string)
+		if role == "user" {
+			if len(headIdx) == 0 || headIdx[len(headIdx)-1] != i {
+				headIdx = append(headIdx, i)
 			}
-			if utf8.RuneCountInString(s) > limit {
-				s = string([]rune(s)[:limit])
-				truncated = true
-			}
-			content = s
-			size = len(s)
-		} else {
-			size = len(m.Content)
-			if size > remaining {
-				content = fmt.Sprintf("[内容过大，已省略 %d 字节]", size)
-				truncated = true
-				size = len(content.(string))
-			} else {
-				content = m.Content // json.RawMessage 原样嵌入
+			break
+		}
+	}
+	for _, i := range headIdx {
+		remaining := headBudget - headUsed
+		if remaining <= 0 {
+			break
+		}
+		msg, size, cut, ok := fitMessage(req.Messages[i], remaining)
+		if !ok {
+			continue
+		}
+		selected[i] = msg
+		headUsed += size
+		truncated = truncated || cut
+	}
+	used = headUsed
+
+	// 尾部：从最新往前填满剩余预算（当前一轮与最近工具调用）。
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if _, ok := selected[i]; ok {
+			continue
+		}
+		remaining := maxChars - used
+		if remaining <= 0 {
+			break
+		}
+		msg, size, cut, ok := fitMessage(req.Messages[i], remaining)
+		if !ok {
+			break
+		}
+		selected[i] = msg
+		used += size
+		truncated = truncated || cut
+	}
+
+	out := make([]Message, 0, len(selected))
+	for i := 0; i < len(req.Messages); i++ {
+		if m, ok := selected[i]; ok {
+			out = append(out, m)
+		}
+	}
+	return CaptureResult{
+		Messages: out, Omitted: len(req.Messages) - len(out),
+		Tools: tools, Truncated: truncated, Bytes: used,
+	}
+}
+
+// fitMessage 把单条消息裁到 cap 字节内；content 为字符串时优先保留前缀。
+func fitMessage(m map[string]any, cap int) (Message, int, bool, bool) {
+	if cap <= 0 {
+		return nil, 0, false, false
+	}
+	cp := make(map[string]any, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	cut := false
+	if c, ok := cp["content"].(string); ok {
+		runes := []rune(c)
+		limit := maxMessageRunes
+		if limit > cap {
+			limit = cap
+		}
+		if len(runes) > limit {
+			runes = runes[:limit]
+			cut = true
+		}
+		cp["content"] = string(runes)
+	} else if c, exists := cp["content"]; exists && c != nil {
+		raw, _ := json.Marshal(c)
+		if len(raw) > cap {
+			cp["content"] = fmt.Sprintf("[内容过大，已省略 %d 字节]", len(raw))
+			cut = true
+		}
+	}
+	raw, err := json.Marshal(cp)
+	if err != nil {
+		return nil, 0, false, false
+	}
+	if len(raw) > cap {
+		if s, ok := cp["content"].(string); ok {
+			runes := []rune(s)
+			for len(raw) > cap && len(runes) > 0 {
+				runes = runes[:len(runes)*3/4]
+				cp["content"] = string(runes)
+				cut = true
+				raw, _ = json.Marshal(cp)
 			}
 		}
-		out = append(out, Message{Role: m.Role, Name: m.Name, Content: content})
-		total += size
 	}
-	if len(out) == 0 {
-		return nil, truncated, 0
+	if len(raw) > cap {
+		return nil, 0, false, false
 	}
-	return out, truncated, total
+	return Message(cp), len(raw), cut, true
 }
 
 // Record 追加一条记录；失败返回错误（调用方只记日志，不影响请求）。
@@ -177,7 +289,7 @@ func (r *Recorder) List(keyID string, limit int) ([]Entry, error) {
 			continue
 		}
 		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+		sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
 		var entries []Entry
 		for sc.Scan() {
 			var e Entry
@@ -203,6 +315,21 @@ func (r *Recorder) Clear(keyID string) (int, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.rewriteLocked(func(e Entry) bool { return e.KeyID != keyID }), nil
+}
+
+// Prune 删除不在 valid 集合里的 key 的记录（清理已删除 key 的残留）。
+func (r *Recorder) Prune(valid map[string]bool) (int, error) {
+	if r == nil || r.cfg.Dir == "" {
+		return 0, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rewriteLocked(func(e Entry) bool { return e.KeyID == "" || valid[e.KeyID] }), nil
+}
+
+// rewriteLocked 逐文件重写，keep 返回 false 的行被删除并计数。
+func (r *Recorder) rewriteLocked(keep func(Entry) bool) int {
 	if r.file != nil {
 		r.file.Close()
 		r.file = nil
@@ -221,13 +348,13 @@ func (r *Recorder) Clear(keyID string) (int, error) {
 			continue
 		}
 		sc := bufio.NewScanner(in)
-		sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+		sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
 		for sc.Scan() {
 			var e Entry
 			if json.Unmarshal(sc.Bytes(), &e) != nil {
 				continue
 			}
-			if e.KeyID == keyID {
+			if !keep(e) {
 				removed++
 				continue
 			}
@@ -240,7 +367,7 @@ func (r *Recorder) Clear(keyID string) (int, error) {
 			os.Remove(tmp)
 		}
 	}
-	return removed, nil
+	return removed
 }
 
 // Start 启动每小时清理（保留天数/容量上限）。
@@ -326,7 +453,6 @@ func (r *Recorder) pruneLocked(now time.Time) {
 			os.Remove(p)
 		}
 	}
-	// 容量上限：保留当前文件，从最旧删到满足上限。
 	files = r.filesLocked()
 	var total int64
 	for _, p := range files {

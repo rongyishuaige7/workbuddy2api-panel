@@ -948,6 +948,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="grow"></span>
           <span class="note" id="keysOrphan"></span>
           <button class="xs" id="btnKeysPrune" hidden>清理孤儿统计</button>
+          <button class="xs" id="btnPromptsPrune">清理已删除 key 的提示词</button>
           <span class="note" id="keysNote">—</span>
           <button class="xs" id="btnKeysRefresh">刷新</button>
           <button class="primary xs" id="btnKeyNew">新建密钥</button>
@@ -1235,8 +1236,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">提示词保留天数</span>
                 <input name="prompt_retention_days" type="number" min="1" placeholder="3"></label>
               <label class="fld"><span class="lb">提示词容量上限（MB）</span>
-                <input name="prompt_max_mb" type="number" min="1" placeholder="50"></label>
+                <input name="prompt_max_mb" type="number" min="1" placeholder="100"></label>
             </div>
+            <label class="fld"><span class="lb">单请求字符上限</span>
+              <input name="prompt_max_chars" type="number" min="1000" placeholder="100000"></label>
             <div class="hint">总开关打开后，还需在「API 密钥」里为具体 key 勾选「记录输入提示词」才会落盘；
               只记录请求 messages（单条/单请求有截断），不含响应与密钥。文件位于 <code>data/prompt-logs/</code>，按保留天数与容量自动清理。</div>
             <div class="hint" style="margin-top:8px">归档开关、保留天数与容量上限（<code>logging.request_archive_*</code>）需手工编辑配置文件。</div>
