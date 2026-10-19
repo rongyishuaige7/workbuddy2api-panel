@@ -1966,8 +1966,8 @@ function openKeyPrompts(k) {
 }
 async function loadKeyPrompts() {
   if (!keyPromptId) return;
-  const onlyUser = $('keyPromptUserOnly').checked;
-  const q = '?limit=50' + (onlyUser ? '&role=user' : '');
+  const scope = $('keyPromptScope').value;
+  const q = '?limit=50' + (scope === 'all' ? '' : '&role=' + scope);
   try {
     const d = await api('keys/' + encodeURIComponent(keyPromptId) + '/prompts' + q);
     keyPromptData = d.entries || [];
@@ -1981,15 +1981,14 @@ function fmtPromptContent(c) {
 }
 function renderKeyPrompts() {
   const el = $('keyPromptList');
-  const onlyUser = $('keyPromptUserOnly').checked;
+  const scope = $('keyPromptScope').value;
   if (!keyPromptData.length) {
     el.innerHTML = '<div class="empty">该 key 暂无提示词记录。若总开关与 key 开关都已开启，通常只是还没有新的 chat 请求（/v1/models 不计）；也可能是请求发生在开启之前。</div>';
     return;
   }
   el.innerHTML = keyPromptData.map(e => {
     const all = e.messages || [];
-    const shown = onlyUser ? all.filter(m => m.role === 'user') : all;
-    const msgs = shown.map(m => {
+    const msgs = all.map(m => {
       const extra = Object.fromEntries(Object.entries(m).filter(([k]) => k !== 'role' && k !== 'content'));
       const extraHtml = Object.keys(extra).length
         ? '<details style="margin-top:4px"><summary class="note">其他字段（tool_calls 等）</summary>' +
@@ -2001,15 +2000,20 @@ function renderKeyPrompts() {
     const omitted = e.omitted ? ' · 省略较早 ' + e.omitted + ' 条' : '';
     const tools = (e.tools && e.tools.length) ? ' · 工具 ' + e.tools.length + ' 个' : '';
     const userCount = all.filter(m => m.role === 'user').length;
-    const noUser = onlyUser && !shown.length
-      ? '<div class="note" style="margin-top:6px">该请求没有 user 消息（多为工具续跑）；取消「只看 user」可看全部。</div>'
+    const scopeLabel = scope === 'real' ? '真实输入 ' + all.length + ' 条'
+      : scope === 'user' ? 'user ' + all.length + ' 条'
+      : 'user ' + userCount + ' 条';
+    const noUser = scope !== 'all' && !all.length
+      ? '<div class="note" style="margin-top:6px">' + (scope === 'real'
+          ? '该请求没有真实用户输入（多为上下文/工具续跑）；可切到「全部消息」查看。'
+          : '该请求没有 user 消息；可切到「全部消息」查看。') + '</div>'
       : '';
     return '<div style="border:1px solid var(--line, #333);border-radius:8px;padding:10px 12px;margin-bottom:10px">' +
-      '<div class="note">' + fmtWhen(e.time) + ' · ' + esc(e.model || '—') + ' · HTTP ' + esc(String(e.status || 0)) + ' · ' + esc(e.request_id || '') + ' · user ' + userCount + ' 条' + omitted + tools + (e.truncated ? ' · <b>已截断</b>' : '') + '</div>' +
+      '<div class="note">' + fmtWhen(e.time) + ' · ' + esc(e.model || '—') + ' · HTTP ' + esc(String(e.status || 0)) + ' · ' + esc(e.request_id || '') + ' · ' + scopeLabel + omitted + tools + (e.truncated ? ' · <b>已截断</b>' : '') + '</div>' +
       (msgs || noUser) + '</div>';
   }).join('');
 }
-$('keyPromptUserOnly').onchange = loadKeyPrompts;
+$('keyPromptScope').onchange = loadKeyPrompts;
 $('btnKeyPromptRefresh').onclick = loadKeyPrompts;
 $('btnKeyPromptClose').onclick = () => { $('keyPromptBox').hidden = true; keyPromptId = ''; };
 $('btnKeyPromptClear').onclick = async () => {

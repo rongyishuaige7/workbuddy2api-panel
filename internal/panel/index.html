@@ -1018,7 +1018,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3 id="keyPromptTitle">输入提示词</h3>
           <span class="grow"></span>
           <span class="note" id="keyPromptNote"></span>
-          <label class="sel-note"><input type="checkbox" id="keyPromptUserOnly" checked> 只看 user</label>
+          <label class="sel-note">范围
+            <select id="keyPromptScope">
+              <option value="real" selected>只看真实输入</option>
+              <option value="user">只看 user</option>
+              <option value="all">全部消息</option>
+            </select>
+          </label>
           <button class="xs" id="btnKeyPromptRefresh">刷新</button>
           <button class="xs danger" id="btnKeyPromptClear">清空该 key 记录</button>
           <button class="xs" id="btnKeyPromptClose">关闭</button>

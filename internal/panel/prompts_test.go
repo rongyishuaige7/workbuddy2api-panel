@@ -17,6 +17,7 @@ func TestKeyPromptsEndpoints(t *testing.T) {
 		Messages: []promptlog.Message{
 			{"role": "developer", "content": "dev-only"},
 			{"role": "user", "content": "hello-monitor"},
+			{"role": "user", "content": "Time sampled while preparing turn 1, step 1: ctx"},
 			{"role": "tool", "content": "tool-out"},
 		},
 	}); err != nil {
@@ -50,8 +51,15 @@ func TestKeyPromptsEndpoints(t *testing.T) {
 	}
 	userOnly := do(http.MethodGet, "/panel/api/keys/k1/prompts?role=user")
 	if userOnly.Code != http.StatusOK || !strings.Contains(userOnly.Body.String(), "hello-monitor") ||
+		!strings.Contains(userOnly.Body.String(), "Time sampled") ||
 		strings.Contains(userOnly.Body.String(), "dev-only") || strings.Contains(userOnly.Body.String(), "tool-out") {
 		t.Fatalf("role=user body=%s", userOnly.Body.String())
+	}
+	realOnly := do(http.MethodGet, "/panel/api/keys/k1/prompts?role=real")
+	if realOnly.Code != http.StatusOK || !strings.Contains(realOnly.Body.String(), "hello-monitor") ||
+		strings.Contains(realOnly.Body.String(), "Time sampled") ||
+		strings.Contains(realOnly.Body.String(), "dev-only") || strings.Contains(realOnly.Body.String(), "tool-out") {
+		t.Fatalf("role=real body=%s", realOnly.Body.String())
 	}
 
 	rec2 = do(http.MethodPost, "/panel/api/keys/k1/prompts/clear")

@@ -386,15 +386,26 @@ func (p *Panel) keyPrompts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "list prompts: "+err.Error())
 		return
 	}
-	// role=user 时只返回 user 消息：面板默认只看用户输入，避免把
-	// developer/system/tool/assistant 的内部上下文铺满屏幕，也大幅缩小响应体。
-	if r.URL.Query().Get("role") == "user" {
+	// role=user 只返回 user 消息；role=real 再剔除 harness 注入的上下文/通知
+	// （Current runtime context、Time sampled、system-reminder、background job 等），
+	// 只留用户真实输入。面板默认用 real，完整消息仍可用「全部消息」查看。
+	mode := r.URL.Query().Get("role")
+	if mode == "user" || mode == "real" {
 		for i := range entries {
 			filtered := make([]promptlog.Message, 0, len(entries[i].Messages))
 			for _, m := range entries[i].Messages {
-				if role, _ := m["role"].(string); role == "user" {
-					filtered = append(filtered, m)
+				role, _ := m["role"].(string)
+				if role != "user" {
+					continue
 				}
+				if mode == "real" {
+					s, _ := m["content"].(string)
+					s = strings.TrimSpace(s)
+					if s == "" || promptlog.IsHarnessContext(s) || strings.HasPrefix(s, "[内容过大，已省略") {
+						continue
+					}
+				}
+				filtered = append(filtered, m)
 			}
 			entries[i].Messages = filtered
 		}

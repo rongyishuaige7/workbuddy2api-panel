@@ -669,7 +669,7 @@ http://127.0.0.1:7863/panel/
 - **用量**：按密钥 ID 聚合今日 / 累计请求数、prompt / completion token、错误数、最近使用时间；今日计数按本地时区跨天归零。表格行内「用量」可展开**按天曲线**（prompt/completion 堆叠柱，7/30/90 天）与**按模型明细**。统计每 30s 落盘到 `data/key_usage.json`（与 `state_file` 同目录），重启后恢复；按天历史保留 90 天。
 - **模型白名单**：受限 key 调白名单外模型返回 `403 model_not_allowed`，`/v1/models` 只返回白名单内模型，`/status` 返回 403。
 - **孤儿统计**：删除/改名后残留的密钥统计会在表头显示条数，点「清理孤儿统计」一次性移除（保留 `owner` 与当前配置中的 key）。
-- **提示词归档（敏感）**：需同时满足「配置 → 日志 → 记录输入提示词」总开关打开（重启生效）与该 key 勾选「记录输入提示词」。开启后，每次 chat 请求的完整 `messages`（含 `tool_calls` / `tool_call_id` / `name` 等全部字段）与工具名写入 `data/prompt-logs/prompts-YYYY-MM-DD.jsonl`；预算采用**头尾双端**策略：头部保留首条 system/developer 与首条 user（原始任务），尾部保留最新消息（当前轮与最近工具调用），中间省略的消息数记在 `omitted`。行内「提示词」可查看最近 50 条、按 key 清空；表头「清理已删除 key 的提示词」清理已删 key 的残留。只记录输入，不含响应、Authorization、token 或工具 schema；单条消息 20000 字符、单请求 `prompt_max_chars` 字符上限，超出标记 truncated；默认保留 3 天 / 100 MiB，启动与每小时自动清理。
+- **提示词归档（敏感）**：需同时满足「配置 → 日志 → 记录输入提示词」总开关打开（重启生效）与该 key 勾选「记录输入提示词」。开启后，每次 chat 请求的完整 `messages`（含 `tool_calls` / `tool_call_id` / `name` 等全部字段）与工具名写入 `data/prompt-logs/prompts-YYYY-MM-DD.jsonl`；预算采用**头尾双端**策略：头部保留首条 system/developer 与首条 user（原始任务），尾部保留最新消息（当前轮与最近工具调用），中间省略的消息数记在 `omitted`。行内「提示词」可查看最近 50 条、按 key 清空；范围默认「只看真实输入」——剔除 harness 注入到 user 角色的运行时上下文（`Current runtime context`、`Time sampled...`、`<system-reminder>`、`background job...` 等），可切「只看 user」或「全部消息」；多模态数组会压成文本并保留 `[图片]` 标记，不再整条丢弃。表头「清理已删除 key 的提示词」清理已删 key 的残留。只记录输入，不含响应、Authorization、token 或工具 schema；单条消息 20000 字符、单请求 `prompt_max_chars` 字符上限，超出标记 truncated；默认保留 3 天 / 100 MiB，启动与每小时自动清理。
 
 > ⚠️ 提示词可能包含账号、密钥、个人隐私等敏感内容。只在确有审计需求的 key 上开启，控制 `panel.api_key` 的持有范围，并设置较短的 `prompt_retention_days`；不要对公网无鉴权开放面板。
 

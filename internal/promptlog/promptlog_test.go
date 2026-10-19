@@ -179,3 +179,42 @@ func TestCounts(t *testing.T) {
 		t.Fatalf("after clear counts=%v", c)
 	}
 }
+
+func TestIsHarnessContext(t *testing.T) {
+	yes := []string{
+		"Time sampled while preparing turn 1, step 1: ...",
+		"Browser time zone for this request: Asia/Shanghai.",
+		"Current runtime context. This snapshot supersedes...",
+		"<system-reminder> A skill is a reusable set of instructions...",
+		"background job pwsh-123 (pwsh: ...)",
+		"Instructions from: ~/.dsh/AGENTS.md",
+		"Current working directory: /x",
+	}
+	for _, s := range yes {
+		if !IsHarnessContext(s) {
+			t.Errorf("should be harness context: %q", s)
+		}
+	}
+	for _, s := range []string{"牛魔", "帮我看看这个 bug", "Time is money", ""} {
+		if IsHarnessContext(s) {
+			t.Errorf("should be user input: %q", s)
+		}
+	}
+}
+
+func TestCaptureFlattensMultimodal(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "这是真正的输入"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,AAAA"}},
+		}},
+	}})
+	res := Capture(body, 1000)
+	if len(res.Messages) != 1 {
+		t.Fatalf("messages=%d", len(res.Messages))
+	}
+	s, ok := res.Messages[0]["content"].(string)
+	if !ok || !strings.Contains(s, "这是真正的输入") || !strings.Contains(s, "[图片]") {
+		t.Fatalf("flattened=%q", s)
+	}
+}

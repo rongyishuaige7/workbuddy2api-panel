@@ -90,6 +90,44 @@ func New(cfg Config) *Recorder {
 	return &Recorder{cfg: cfg}
 }
 
+// harnessPrefixes 是 DSH 运行时注入到 user 角色的上下文标记。这些内容不是用户
+// 真实输入，面板默认不展示；完整消息仍保留在归档里，可切换「全部消息」查看。
+var harnessPrefixes = []string{
+	"Time sampled while preparing turn",
+	"Browser time zone for this request",
+	"Current runtime context",
+	"Current DSH file policy",
+	"Current working directory:",
+	"Approval policy:",
+	"Current DeepSeek Harness implementation checkout",
+	"Current DSH Web GUI URL",
+	"Instructions from:",
+	"<system-reminder>",
+	"background job ",
+	"A skill is a reusable set",
+	"The following skills are available in this session",
+	"Use only names in this replacement catalog",
+	"A user may also invoke a skill directly",
+	"Skills load from",
+}
+
+// IsHarnessContext 判断一段 user 内容是否是 harness 注入的上下文/通知。
+func IsHarnessContext(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	for _, p := range harnessPrefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	if strings.Contains(s, "<system-reminder>") && strings.Contains(s, "A skill is a reusable set") {
+		return true
+	}
+	return false
+}
+
 // Capture 从 chat 请求体提取 messages 与工具名。
 //
 // 预算从最新消息向前分配：先保住最后一轮（当前用户输入与最近的工具调用），
@@ -202,6 +240,41 @@ func Capture(body []byte, maxChars int) CaptureResult {
 	}
 }
 
+// flattenContent 把字符串/多模态数组压成可读文本，避免整条大消息被占位符丢掉。
+// 图片等非文本 part 保留为 [图片] 标记；其他类型返回 ok=false 走原始 JSON。
+func flattenContent(v any) (string, bool) {
+	switch c := v.(type) {
+	case string:
+		return c, true
+	case []any:
+		parts := make([]string, 0, len(c))
+		for _, p := range c {
+			switch part := p.(type) {
+			case string:
+				parts = append(parts, part)
+			case map[string]any:
+				typ, _ := part["type"].(string)
+				switch typ {
+				case "text", "input_text":
+					if t, ok := part["text"].(string); ok {
+						parts = append(parts, t)
+					}
+				case "image_url", "image", "input_image":
+					parts = append(parts, "[图片]")
+				default:
+					if t, ok := part["text"].(string); ok {
+						parts = append(parts, t)
+					} else {
+						parts = append(parts, "["+typ+"]")
+					}
+				}
+			}
+		}
+		return strings.Join(parts, "\n"), true
+	}
+	return "", false
+}
+
 // fitMessage 把单条消息裁到 cap 字节内；content 为字符串时优先保留前缀。
 func fitMessage(m map[string]any, cap int) (Message, int, bool, bool) {
 	if cap <= 0 {
@@ -212,8 +285,8 @@ func fitMessage(m map[string]any, cap int) (Message, int, bool, bool) {
 		cp[k] = v
 	}
 	cut := false
-	if c, ok := cp["content"].(string); ok {
-		runes := []rune(c)
+	if s, ok := flattenContent(cp["content"]); ok {
+		runes := []rune(s)
 		limit := maxMessageRunes
 		if limit > cap {
 			limit = cap
