@@ -1773,14 +1773,14 @@ function renderKeys() {
         '<button class="xs" data-act="copy">复制</button></span></td>' +
       '<td class="k-models"><div class="clip" title="' + esc(modelsTitle) + '">' + models + '</div></td>' +
       '<td>' + (k.rpm ? esc(String(k.rpm)) + ' rpm' : '<span class="note">不限</span>') + '</td>' +
-      '<td class="num">' + (k.daily_tokens ? fmtNum(k.daily_tokens) : '<span class="note">不限</span>') + '</td>' +
+      '<td class="num">' + (k.daily_tokens ? fmtTok(k.daily_tokens) : '<span class="note">不限</span>') + '</td>' +
       '<td>' + state + '</td>' +
       '<td>' + (k.capture_prompts ? '<span class="tag ok">记录</span>' : '<span class="note">—</span>') +
         (Number(k.prompt_count || 0) ? ' <span class="note">' + fmtNum(k.prompt_count) + ' 条</span>' : '') + '</td>' +
       '<td class="num">' + fmtNum(st.today_requests) + '</td>' +
-      '<td class="num">' + fmtNum(st.today_tokens) + '</td>' +
+      '<td class="num">' + fmtTok(st.today_tokens) + '</td>' +
       '<td class="num">' + fmtNum(st.requests) + '</td>' +
-      '<td class="num">' + fmtNum(tokens) + '</td>' +
+      '<td class="num">' + fmtTok(tokens) + '</td>' +
       '<td class="num">' + fmtNum(st.errors) + '</td>' +
       '<td>' + fmtWhen(st.last_used) + '</td>' +
       '<td class="c-acts"><div class="acts">' +
@@ -1910,14 +1910,14 @@ function renderKeyUsageChart() {
     const w = Math.max(1, bw - gap);
     const hp = (p / max) * innerH, hc = (c / max) * innerH;
     const yc = padT + innerH - hc, yp = yc - hp;
-    if (hp > 0) bars += '<rect x="' + x + '" y="' + yp + '" width="' + w + '" height="' + hp + '" fill="#5b8def"><title>' + esc(d.day) + ' · prompt ' + p + '</title></rect>';
-    if (hc > 0) bars += '<rect x="' + x + '" y="' + yc + '" width="' + w + '" height="' + hc + '" fill="#9b8cff"><title>' + esc(d.day) + ' · completion ' + c + '</title></rect>';
+    if (hp > 0) bars += '<rect x="' + x + '" y="' + yp + '" width="' + w + '" height="' + hp + '" fill="#5b8def"><title>' + esc(d.day) + ' · prompt ' + fmtTok(p) + '</title></rect>';
+    if (hc > 0) bars += '<rect x="' + x + '" y="' + yc + '" width="' + w + '" height="' + hc + '" fill="#9b8cff"><title>' + esc(d.day) + ' · completion ' + fmtTok(c) + '</title></rect>';
   });
   const y0 = padT + innerH;
   const first = days[0].day, last = days[days.length - 1].day;
   el.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:100%">' +
     '<line x1="' + padL + '" y1="' + y0 + '" x2="' + (W - padR) + '" y2="' + y0 + '" stroke="currentColor" stroke-opacity=".25"/>' +
-    '<text x="' + (padL - 6) + '" y="' + (padT + 8) + '" text-anchor="end" font-size="10" fill="currentColor" fill-opacity=".55">' + fmtNum(max) + '</text>' +
+    '<text x="' + (padL - 6) + '" y="' + (padT + 8) + '" text-anchor="end" font-size="10" fill="currentColor" fill-opacity=".55">' + fmtTok(max) + '</text>' +
     '<text x="' + (padL - 6) + '" y="' + y0 + '" text-anchor="end" font-size="10" fill="currentColor" fill-opacity=".55">0</text>' +
     '<text x="' + padL + '" y="' + (H - 8) + '" font-size="10" fill="currentColor" fill-opacity=".55">' + esc(first) + '</text>' +
     '<text x="' + (W - padR) + '" y="' + (H - 8) + '" text-anchor="end" font-size="10" fill="currentColor" fill-opacity=".55">' + esc(last) + '</text>' +
@@ -1940,7 +1940,7 @@ function renderKeyUsageModels() {
     tb.innerHTML = '<tr><td colspan="5"><div class="empty">该时段没有用量</div></td></tr>';
     return;
   }
-  tb.innerHTML = rows.map(([m, a]) => '<tr><td><code>' + esc(m) + '</code></td><td>' + fmtNum(a.requests) + '</td><td>' + fmtNum(a.prompt) + '</td><td>' + fmtNum(a.completion) + '</td><td>' + fmtNum(a.prompt + a.completion) + '</td></tr>').join('');
+  tb.innerHTML = rows.map(([m, a]) => '<tr><td><code>' + esc(m) + '</code></td><td>' + fmtNum(a.requests) + '</td><td>' + fmtTok(a.prompt) + '</td><td>' + fmtTok(a.completion) + '</td><td>' + fmtTok(a.prompt + a.completion) + '</td></tr>').join('');
 }
 $('keyUsageDays').onchange = loadKeyUsage;
 $('btnKeyUsageClose').onclick = () => { $('keyUsageBox').hidden = true; keyUsageId = ''; };
@@ -2748,9 +2748,9 @@ function reattachQueueView() {
 
 function fmtTok(n) {
   n = Number(n || 0);
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  if (n >= 1e9) return trimFixed((n / 1e9).toFixed(2)) + 'B';
+  if (n >= 1e6) return trimFixed((n / 1e6).toFixed(2)) + 'M';
+  if (n >= 1e3) return trimFixed((n / 1e3).toFixed(1)) + 'K';
   return String(n);
 }
 function fmtMs(ms) {
