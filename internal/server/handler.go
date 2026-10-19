@@ -184,6 +184,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// /v1/* 兜底：未实现的端点返回可读的 JSON 404，而不是 Go mux 的纯文本
+	// "404 page not found"（客户端只显示 404，无法判断是路径还是协议不支持）。
+	h.mux.HandleFunc("/v1/", h.v1NotFound)
+	h.mux.HandleFunc("/v1", h.v1NotFound)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
 	}
@@ -235,6 +239,26 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), apiKeyPolicyKey{}, pol)))
 	}
+}
+
+// v1NotFound 兜底 /v1/* 未实现端点：给客户端可读的 OpenAI 风格错误。
+// 已知端点但方法不对时返回 405 + Allow（与 ServeMux 语义一致）；未知端点返回
+// 404 并点名本网关实际支持的端点，避免客户端只看到裸 "404 page not found"。
+func (h *Handler) v1NotFound(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/v1/chat/completions":
+		w.Header().Set("Allow", http.MethodPost)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"use POST /v1/chat/completions")
+		return
+	case "/v1/models":
+		w.Header().Set("Allow", http.MethodGet)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"use GET /v1/models")
+		return
+	}
+	writeOpenAIError(w, http.StatusNotFound, "not_found",
+		fmt.Sprintf("unsupported endpoint %q; this gateway supports POST /v1/chat/completions and GET /v1/models", r.URL.Path))
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
