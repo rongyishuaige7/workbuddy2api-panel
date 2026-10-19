@@ -80,9 +80,9 @@ type Config struct {
 		PromptCaptureEnabled bool `json:"prompt_capture_enabled"`
 		// PromptRetentionDays 提示词归档保留天数，缺省 3；<=0 回落默认。
 		PromptRetentionDays int `json:"prompt_retention_days"`
-		// PromptMaxMB 提示词归档总容量上限（MiB），缺省 50；<=0 回落默认。
+		// PromptMaxMB 提示词归档总容量上限（MiB），缺省 100；<=0 回落默认。
 		PromptMaxMB int `json:"prompt_max_mb"`
-		// PromptMaxChars 单请求捕获的字符上限，缺省 20000；<=0 回落默认。
+		// PromptMaxChars 单请求捕获的字符上限，缺省 100000（硬上限 500000）；<=0 回落默认。
 		PromptMaxChars int `json:"prompt_max_chars"`
 	} `json:"logging"`
 

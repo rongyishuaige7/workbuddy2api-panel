@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/promptlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 )
 
@@ -21,4 +24,23 @@ func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
 		realm, bare := server.ResolveModel(model)
 		return p.WeightedAvailableUIDsForModelRealm(bare, realm)
 	}
+}
+
+// Management and retention stay available when capture is disabled.
+func setupPromptLogs(cfg *Config) (manager, capture *promptlog.Recorder, err error) {
+	if cfg.Logging.PromptCaptureEnabled && cfg.APIKey == "" && cfg.Panel.APIKey == "" {
+		return nil, nil, fmt.Errorf("prompt capture requires an administrative API key")
+	}
+	manager = promptlog.New(promptlog.Config{
+		Dir:           stateSibling(cfg.StateFile, "prompt-logs"),
+		RetentionDays: cfg.Logging.PromptRetentionDays,
+		MaxBytes:      int64(cfg.Logging.PromptMaxMB) << 20,
+	})
+	if err := manager.Start(); err != nil {
+		return nil, nil, err
+	}
+	if cfg.Logging.PromptCaptureEnabled {
+		capture = manager
+	}
+	return manager, capture, nil
 }

@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,5 +71,54 @@ func TestKeyPromptsEndpoints(t *testing.T) {
 	rec2 = do(http.MethodGet, "/panel/api/keys/k1/prompts")
 	if strings.Contains(rec2.Body.String(), "hello-monitor") {
 		t.Fatal("prompts should be cleared")
+	}
+}
+
+func TestPromptArchivesRequireAdministrativeKey(t *testing.T) {
+	rec := promptlog.New(promptlog.Config{Dir: t.TempDir()})
+	defer rec.Close()
+	if err := rec.Record(promptlog.Entry{KeyID: "k1"}); err != nil {
+		t.Fatal(err)
+	}
+	p := New(Config{PromptLog: rec, ListAPIKeys: func() ([]APIKeyView, error) { return []APIKeyView{{ID: "k1"}}, nil }})
+	for _, tc := range []struct{ method, path string }{{"GET", "/panel/api/keys/k1/prompts"}, {"POST", "/panel/api/keys/k1/prompts/clear"}, {"POST", "/panel/api/prompts/prune"}} {
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		if w.Code != http.StatusForbidden || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("anonymous archive access: %s %d", tc.path, w.Code)
+		}
+	}
+	if rec.Counts()["k1"] != 1 {
+		t.Fatal("unauthenticated mutation changed archive")
+	}
+}
+
+func TestKeyPromptsFreshViewAPI(t *testing.T) {
+	rec := promptlog.New(promptlog.Config{Dir: t.TempDir()})
+	defer rec.Close()
+	now := time.Now()
+	for i := 0; i < 2; i++ {
+		body := `{"prompt_cache_key":"s","messages":[{"role":"user","content":"继续"}]}`
+		if i == 1 {
+			body = `{"prompt_cache_key":"s","messages":[{"role":"user","content":"继续"},{"role":"user","content":"继续"}]}`
+		}
+		c := promptlog.Capture([]byte(body), 1000)
+		if err := rec.Record(promptlog.Entry{Version: 2, Time: now.Add(time.Duration(i) * time.Second), KeyID: "k1", SessionHash: c.SessionHash, Messages: c.Messages, MessageIndexes: c.MessageIndexes, Inputs: c.Inputs}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := New(Config{APIKey: "admin", PromptLog: rec, ListAPIKeys: func() ([]APIKeyView, error) { return []APIKeyView{{ID: "k1"}}, nil }})
+	req := httptest.NewRequest("GET", "/panel/api/keys/k1/prompts?role=fresh", nil)
+	req.Header.Set("Authorization", "Bearer admin")
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+	var data struct {
+		Entries []promptlog.Entry `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || len(data.Entries) != 2 || data.Entries[0].FreshState != "new" || len(data.Entries[0].Messages) != 1 || data.Entries[1].FreshState != "unknown" {
+		t.Fatalf("fresh API returned incorrect view: %s", w.Body.String())
 	}
 }

@@ -23,7 +23,6 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/promptlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/ratelimit"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
@@ -284,20 +283,12 @@ func main() {
 	rateLimiter := ratelimit.New()
 
 	// 提示词归档（敏感）：默认关闭；只有全局开关 + 单 key 开关同时打开才写入。
-	var promptLog *promptlog.Recorder
-	if cfg.Logging.PromptCaptureEnabled {
-		promptLog = promptlog.New(promptlog.Config{
-			Dir:           stateSibling(cfg.StateFile, "prompt-logs"),
-			RetentionDays: cfg.Logging.PromptRetentionDays,
-			MaxBytes:      int64(cfg.Logging.PromptMaxMB) << 20,
-		})
-		promptLog.Start()
-		defer promptLog.Close()
-		log.Printf("[promptlog] 提示词归档已启用: %s（保留 %d 天，上限 %d MiB）",
-			stateSibling(cfg.StateFile, "prompt-logs"), cfg.Logging.PromptRetentionDays, cfg.Logging.PromptMaxMB)
-	} else {
-		log.Printf("[promptlog] 提示词归档未启用（logging.prompt_capture_enabled=false）")
+	promptLog, captureLog, err := setupPromptLogs(cfg)
+	if err != nil {
+		log.Fatalf("prompt log: %v", err)
 	}
+	defer promptLog.Close()
+	log.Printf("[promptlog] 归档管理已启动，输入采集开启=%t", captureLog != nil)
 
 	pn := panel.New(panel.Config{
 		Pool:        p,
@@ -379,7 +370,7 @@ func main() {
 		RequestLog:         requestLog,
 		RateLimit:          rateLimiter,
 		KeyStats:           keyStats,
-		PromptLog:          promptLog,
+		PromptLog:          captureLog,
 		PromptMaxChars:     cfg.Logging.PromptMaxChars,
 		PromptMode:         cfg.Prompt.Mode,
 		PromptText:         cfg.PromptText,

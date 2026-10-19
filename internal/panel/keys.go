@@ -92,8 +92,12 @@ func (p *Panel) listKeys(w http.ResponseWriter, r *http.Request) {
 		stats = p.cfg.KeyStats.Snapshot()
 	}
 	counts := map[string]int{}
-	if p.cfg.PromptLog != nil {
-		counts = p.cfg.PromptLog.Counts()
+	if p.cfg.PromptLog != nil && p.apiKey() != "" {
+		counts, err = p.cfg.PromptLog.CountSnapshot()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "count prompts: "+err.Error())
+			return
+		}
 	}
 	rows := make([]apiKeyRow, 0, len(keys))
 	for _, k := range keys {
