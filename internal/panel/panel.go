@@ -23,6 +23,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/keystats"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
@@ -67,6 +68,13 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// KeyStats 每密钥用量统计（nil = 密钥视图不展示统计）。
+	KeyStats *keystats.Recorder
+	// ListAPIKeys / SaveAPIKeys 是「API 密钥」视图的读写闭包（main 注入，
+	// 面板不依赖 cmd/server 的配置类型）。SaveAPIKeys 走同一套校验 + 热生效。
+	ListAPIKeys func() ([]APIKeyView, error)
+	SaveAPIKeys func([]APIKeyView) error
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -92,6 +100,9 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// keysMu 串行化密钥配置的读-改-写，避免两个面板请求互相覆盖。
+	keysMu sync.Mutex
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -191,6 +202,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	p.mux.HandleFunc("GET /panel/api/keys", p.withAuth(p.listKeys))
+	p.mux.HandleFunc("POST /panel/api/keys", p.withAuth(p.saveKey))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/toggle", p.withAuth(p.toggleKey))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/rotate", p.withAuth(p.rotateKey))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/remove", p.withAuth(p.removeKey))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

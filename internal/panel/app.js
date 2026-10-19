@@ -428,13 +428,14 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', keys: 'API 密钥', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
+  if (v === 'keys') loadKeys();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
@@ -1697,6 +1698,140 @@ $('cfgForm').onsubmit = async ev => {
     loadOverview(true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '保存配置'; }
+};
+
+/* ── API 密钥 ─────────────────────────────────────────────────────── */
+let keysCache = [];
+let keyEditId = '';
+
+function maskKey(k) {
+  if (!k) return '—';
+  if (k.length <= 12) return k;
+  return k.slice(0, 6) + '…' + k.slice(-4);
+}
+function fmtNum(n) { return Number(n || 0).toLocaleString('zh-CN'); }
+function fmtWhen(t) {
+  if (!t || String(t).startsWith('0001')) return '—';
+  const d = new Date(t);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN');
+}
+
+async function loadKeys() {
+  try {
+    const d = await api('keys');
+    keysCache = d.keys || [];
+    $('keysNote').textContent = keysCache.length ? keysCache.length + ' 把密钥' : '暂无附加密钥';
+    renderKeys();
+  } catch (e) { toast('读取密钥失败：' + e.message, 'err'); }
+}
+
+function renderKeys() {
+  const tb = $('keysBody');
+  if (!keysCache.length) {
+    tb.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="big">还没有附加密钥</div>点右上角「新建密钥」给他人发放一把。</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = keysCache.map(k => {
+    const st = k.stats || {};
+    const models = (k.models && k.models.length)
+      ? k.models.map(m => '<code>' + esc(m) + '</code>').join(' ')
+      : '<span class="note">全部</span>';
+    const state = k.disabled ? '<span class="tag bad">已禁用</span>' : '<span class="tag ok">启用</span>';
+    const tokens = Number(st.prompt_tokens || 0) + Number(st.completion_tokens || 0);
+    return '<tr data-id="' + esc(k.id) + '">' +
+      '<td>' + (k.name ? esc(k.name) : '<span class="note">—</span>') + '</td>' +
+      '<td><code class="key-mask">' + esc(maskKey(k.key)) + '</code> ' +
+        '<button class="xs" data-act="reveal">显示</button> ' +
+        '<button class="xs" data-act="copy">复制</button></td>' +
+      '<td>' + models + '</td>' +
+      '<td>' + (k.rpm ? esc(String(k.rpm)) + ' rpm' : '<span class="note">不限</span>') + '</td>' +
+      '<td>' + state + '</td>' +
+      '<td>' + fmtNum(st.today_requests) + '</td>' +
+      '<td>' + fmtNum(st.today_tokens) + '</td>' +
+      '<td>' + fmtNum(st.requests) + '</td>' +
+      '<td>' + fmtNum(tokens) + '</td>' +
+      '<td>' + fmtNum(st.errors) + '</td>' +
+      '<td>' + fmtWhen(st.last_used) + '</td>' +
+      '<td class="acts">' +
+        '<button class="xs" data-act="edit">编辑</button>' +
+        '<button class="xs" data-act="toggle">' + (k.disabled ? '启用' : '禁用') + '</button>' +
+        '<button class="xs" data-act="rotate">轮换</button>' +
+        '<button class="xs danger" data-act="remove">删除</button>' +
+      '</td></tr>';
+  }).join('');
+}
+
+function openKeyForm(k) {
+  keyEditId = k ? k.id : '';
+  $('keyFormTitle').textContent = k ? '编辑密钥' : '新建密钥';
+  $('keyName').value = k ? (k.name || '') : '';
+  $('keyRpm').value = k && k.rpm ? String(k.rpm) : '';
+  $('keyModels').value = k && k.models ? k.models.join(', ') : '';
+  $('keyEnabled').checked = k ? !k.disabled : true;
+  $('keyFormNote').textContent = k ? k.id : '保存后生成新密钥，创建时会自动复制';
+  $('keyFormBox').hidden = false;
+  $('keyName').focus();
+}
+
+$('keysBody').addEventListener('click', async ev => {
+  const btn = ev.target.closest('button[data-act]');
+  if (!btn) return;
+  const tr = btn.closest('tr');
+  const k = keysCache.find(x => x.id === (tr && tr.dataset.id));
+  if (!k) return;
+  const act = btn.dataset.act;
+  try {
+    if (act === 'reveal') {
+      const code = tr.querySelector('.key-mask');
+      const show = btn.textContent === '显示';
+      code.textContent = show ? k.key : maskKey(k.key);
+      btn.textContent = show ? '隐藏' : '显示';
+      return;
+    }
+    if (act === 'copy') { await copyText(k.key); toast('密钥已复制', 'ok'); return; }
+    if (act === 'edit') { openKeyForm(k); return; }
+    if (act === 'toggle') {
+      await api('keys/' + encodeURIComponent(k.id) + '/toggle', { method: 'POST' });
+      await loadKeys(); return;
+    }
+    if (act === 'rotate') {
+      if (!confirm('轮换后旧密钥立即失效，确定？')) return;
+      const r = await api('keys/' + encodeURIComponent(k.id) + '/rotate', { method: 'POST' });
+      if (r.key) await copyText(r.key);
+      await loadKeys();
+      toast('已轮换并复制新密钥', 'ok');
+      return;
+    }
+    if (act === 'remove') {
+      if (!confirm('删除这把密钥？该操作不可恢复。')) return;
+      await api('keys/' + encodeURIComponent(k.id) + '/remove', { method: 'POST' });
+      await loadKeys(); return;
+    }
+  } catch (e) { toast('操作失败：' + e.message, 'err'); }
+});
+
+$('btnKeysRefresh').onclick = loadKeys;
+$('btnKeyNew').onclick = () => openKeyForm(null);
+$('btnKeyCancel').onclick = () => { $('keyFormBox').hidden = true; };
+$('btnKeySave').onclick = async () => {
+  const rpm = Number($('keyRpm').value || 0);
+  if (!Number.isFinite(rpm) || rpm < 0 || !Number.isInteger(rpm)) {
+    toast('RPM 必须是非负整数', 'err'); return;
+  }
+  const body = {
+    id: keyEditId,
+    name: $('keyName').value.trim(),
+    models: $('keyModels').value.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean),
+    rpm: rpm,
+    disabled: !$('keyEnabled').checked,
+  };
+  try {
+    const r = await api('keys', { method: 'POST', body: JSON.stringify(body) });
+    if (r.key) { await copyText(r.key); toast('已创建并复制新密钥', 'ok'); }
+    else toast('已保存', 'ok');
+    $('keyFormBox').hidden = true;
+    await loadKeys();
+  } catch (e) { toast('保存失败：' + e.message, 'err'); }
 };
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */

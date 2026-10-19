@@ -3,7 +3,9 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,9 +22,18 @@ import (
 // api_key 仍是拥有者密钥（不限模型、可用于 /status）；本列表用于给他人发放
 // 受限密钥：models 非空时该 key 只能调用列出的模型，/v1/models 也只返回这些模型。
 type APIKeyConfig struct {
-	Key    string   `json:"key"`
-	Name   string   `json:"name"`   // 备注，便于排障
-	Models []string `json:"models"` // 允许的模型 id；空 = 不限
+	ID       string   `json:"id"`       // 稳定标识；空则由 key 派生（轮换 key 时面板会保留原 ID）
+	Name     string   `json:"name"`     // 备注，便于排障
+	Key      string   `json:"key"`      // 密钥原文
+	Models   []string `json:"models"`   // 允许的模型 id；空 = 不限
+	RPM      int      `json:"rpm"`      // 每分钟请求上限；0 = 不限
+	Disabled bool     `json:"disabled"` // 禁用后返回 403 key_disabled（不删除配置，便于随时恢复）
+}
+
+// deriveKeyID 由密钥值派生稳定 ID（旧配置没有 id 时使用）。
+func deriveKeyID(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "k_" + hex.EncodeToString(sum[:])[:10]
 }
 
 // Config 顶层配置。
@@ -490,14 +501,17 @@ func applyEnv(c *Config) {
 }
 
 // normalizeAPIKeys 去空白并 fail-fast 校验：空 key、与拥有者密钥重复、附加密钥之间
-// 重复，都视为配置错误（重复会让「命中哪一把」取决于遍历顺序，排障时不可复现）。
+// 重复、ID 重复、负 rpm，都视为配置错误（重复会让「命中哪一把」取决于遍历顺序，
+// 排障时不可复现）。
 func (c *Config) normalizeAPIKeys() error {
 	seen := make(map[string]string, len(c.APIKeys)+1)
+	ids := make(map[string]int, len(c.APIKeys))
 	if c.APIKey != "" {
 		seen[c.APIKey] = "api_key"
 	}
 	for i := range c.APIKeys {
 		k := &c.APIKeys[i]
+		k.ID = strings.TrimSpace(k.ID)
 		k.Key = strings.TrimSpace(k.Key)
 		k.Name = strings.TrimSpace(k.Name)
 		if k.Key == "" {
@@ -507,6 +521,16 @@ func (c *Config) normalizeAPIKeys() error {
 			return fmt.Errorf("api_keys[%d].key: 与 %s 重复", i, prev)
 		}
 		seen[k.Key] = fmt.Sprintf("api_keys[%d]", i)
+		if k.ID == "" {
+			k.ID = deriveKeyID(k.Key)
+		}
+		if prev, dup := ids[k.ID]; dup {
+			return fmt.Errorf("api_keys[%d].id: 与 api_keys[%d] 重复", i, prev)
+		}
+		ids[k.ID] = i
+		if k.RPM < 0 {
+			return fmt.Errorf("api_keys[%d].rpm: 不能为负", i)
+		}
 		for j := range k.Models {
 			k.Models[j] = strings.TrimSpace(k.Models[j])
 			if k.Models[j] == "" {

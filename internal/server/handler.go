@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"sync"
@@ -18,10 +20,12 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/keystats"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/ratelimit"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -34,6 +38,10 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
 	MaxRotate int    // 单请求最多换号次数，默认 3
+	// RateLimit 每密钥限速器（nil = 不限速）。
+	RateLimit *ratelimit.Limiter
+	// KeyStats 每密钥用量统计（nil = 不统计）。
+	KeyStats *keystats.Recorder
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -195,7 +203,7 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
+	if (h.cfg.RequestLog != nil || h.cfg.KeyStats != nil) && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
 		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
@@ -203,13 +211,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(context.WithValue(r.Context(), requestTraceKey{}, trace))
 		obs := &responseObserver{ResponseWriter: w}
 		w.Header().Set("X-Request-Id", trace.id)
-		h.cfg.RequestLog.Begin()
+		if h.cfg.RequestLog != nil {
+			h.cfg.RequestLog.Begin()
+		}
 		defer func() {
 			status := obs.status
 			if status == 0 {
 				status = http.StatusOK
 			}
-			h.cfg.RequestLog.Record(trace.event(status))
+			if h.cfg.RequestLog != nil {
+				h.cfg.RequestLog.Record(trace.event(status))
+			}
+			// 每密钥统计：chat 走 trace（带 token 增量）；withAuth 里的 403/429
+			// 已记账并置 statsDone，避免重复计数。
+			if h.cfg.KeyStats != nil && trace.keyID != "" && !trace.statsDone {
+				var pt, ct int64
+				if trace.stat != nil {
+					pt, ct = trace.stat.promptTokens, trace.stat.completionTokens
+				}
+				h.cfg.KeyStats.Record(trace.keyID, status, pt, ct)
+			}
 		}()
 		h.mux.ServeHTTP(obs, r)
 		return
@@ -237,7 +258,52 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
+		if pol.Disabled {
+			h.noteKeyRejected(r, pol, http.StatusForbidden)
+			writeOpenAIError(w, http.StatusForbidden, "key_disabled", "this API key is disabled")
+			return
+		}
+		if h.cfg.RateLimit != nil {
+			if ok, retry := h.cfg.RateLimit.Allow(pol.ID, pol.RPM); !ok {
+				secs := int(math.Ceil(retry.Seconds()))
+				if secs < 1 {
+					secs = 1
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(secs))
+				h.noteKeyRejected(r, pol, http.StatusTooManyRequests)
+				writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_exceeded",
+					fmt.Sprintf("rate limit exceeded for this API key (%d rpm)", pol.RPM))
+				return
+			}
+		}
+		// chat 请求的 trace 在 ServeHTTP 创建；把密钥身份挂上去，供出口统计。
+		if tr := requestTraceFrom(r); tr != nil {
+			tr.keyID = pol.ID
+			tr.keyName = pol.Name
+		}
 		next(w, r.WithContext(context.WithValue(r.Context(), apiKeyPolicyKey{}, pol)))
+	}
+}
+
+// noteKeyRejected 记录被鉴权层直接拒绝的请求（禁用/限速），并标记 trace 已记账，
+// 避免 ServeHTTP 出口重复计数。401（未知密钥）没有可归属的 ID，不记录。
+func (h *Handler) noteKeyRejected(r *http.Request, pol httpauth.Policy, status int) {
+	if h.cfg.KeyStats == nil || pol.ID == "" {
+		return
+	}
+	h.cfg.KeyStats.Record(pol.ID, status, 0, 0)
+	if tr := requestTraceFrom(r); tr != nil {
+		tr.statsDone = true
+	}
+}
+
+// recordKeyRequest 记录非 chat 端点（/v1/models、/status）的请求计数。
+func (h *Handler) recordKeyRequest(r *http.Request, status int) {
+	if h.cfg.KeyStats == nil {
+		return
+	}
+	if pol := policyFrom(r); pol.ID != "" {
+		h.cfg.KeyStats.Record(pol.ID, status, 0, 0)
 	}
 }
 
@@ -289,6 +355,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// 账号池状态（积分/冷却/粘性）属于管理视图：受限密钥（带模型白名单）不开放，
 	// 避免「给他人一把只能调某个模型的 key」却顺带泄露全部账号状态。
 	if pol := policyFrom(r); !pol.Unrestricted() {
+		h.recordKeyRequest(r, http.StatusForbidden)
 		writeOpenAIError(w, http.StatusForbidden, "forbidden", "status requires an unrestricted API key")
 		return
 	}
@@ -334,6 +401,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"per_model":    exploreLast,
 		},
 	})
+	h.recordKeyRequest(r, http.StatusOK)
 }
 
 // countsMapFrom 把 CountsDetailed 五元组打包成 /status 的域分组建模。
@@ -370,6 +438,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 		"object": "list",
 		"data":   filterModelList(h.modelList(), policyFrom(r)),
 	})
+	h.recordKeyRequest(r, http.StatusOK)
 }
 
 // filterModelList 按密钥的模型白名单过滤 /v1/models：受限密钥只看到自己能用的

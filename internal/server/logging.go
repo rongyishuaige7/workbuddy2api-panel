@@ -353,6 +353,11 @@ type requestTrace struct {
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
+	// 命中的 API 密钥（withAuth 写入；用于每密钥统计与请求归档）。
+	keyID   string
+	keyName string
+	// statsDone 表示 withAuth 已记账（禁用/限速的拒绝），出口不再重复计数。
+	statsDone bool
 }
 
 // captureClientInfo 采集调用来源（客户端 IP + 截断后的 UA）。开关关闭时保持空串：

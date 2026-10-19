@@ -19,9 +19,11 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/keystats"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/ratelimit"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
@@ -271,6 +273,15 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
+	// 每密钥用量统计：与 state 文件同目录；30s 落盘，重启后恢复。
+	keyStats := keystats.New(stateSibling(cfg.StateFile, "key_usage.json"))
+	if err := keyStats.Load(); err != nil {
+		log.Printf("[keystats] 读取失败（从零开始）: %v", err)
+	}
+	keyStats.Start()
+	defer keyStats.Stop()
+	rateLimiter := ratelimit.New()
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -294,6 +305,36 @@ func main() {
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
 		},
+		KeyStats: keyStats,
+		ListAPIKeys: func() ([]panel.APIKeyView, error) {
+			c, err := Load(*cfgPath)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]panel.APIKeyView, 0, len(c.APIKeys))
+			for _, k := range c.APIKeys {
+				out = append(out, panel.APIKeyView{
+					ID: k.ID, Name: k.Name, Key: k.Key,
+					Models: k.Models, RPM: k.RPM, Disabled: k.Disabled,
+				})
+			}
+			return out, nil
+		},
+		SaveAPIKeys: func(keys []panel.APIKeyView) error {
+			arr := make([]map[string]any, 0, len(keys))
+			for _, k := range keys {
+				arr = append(arr, map[string]any{
+					"id": k.ID, "name": k.Name, "key": k.Key,
+					"models": k.Models, "rpm": k.RPM, "disabled": k.Disabled,
+				})
+			}
+			raw, err := json.Marshal(map[string]any{"api_keys": arr})
+			if err != nil {
+				return err
+			}
+			_, err = saveConfig(raw, *cfgPath, live, p, up, sch)
+			return err
+		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
@@ -316,6 +357,8 @@ func main() {
 		Live:               live,
 		Usage:              rec,
 		RequestLog:         requestLog,
+		RateLimit:          rateLimiter,
+		KeyStats:           keyStats,
 		PromptMode:         cfg.Prompt.Mode,
 		PromptText:         cfg.PromptText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
@@ -635,7 +678,10 @@ func apiKeyPolicies(cfg *Config) []httpauth.Policy {
 	}
 	out := make([]httpauth.Policy, 0, len(cfg.APIKeys))
 	for _, k := range cfg.APIKeys {
-		out = append(out, httpauth.Policy{Key: k.Key, Name: k.Name, Models: k.Models})
+		out = append(out, httpauth.Policy{
+			ID: k.ID, Key: k.Key, Name: k.Name,
+			Models: k.Models, RPM: k.RPM, Disabled: k.Disabled,
+		})
 	}
 	return out
 }

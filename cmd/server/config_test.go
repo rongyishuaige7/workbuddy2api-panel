@@ -899,3 +899,20 @@ func TestAPIKeysConfig(t *testing.T) {
 		t.Error("附加密钥之间重复必须 fail fast")
 	}
 }
+
+func TestAPIKeyConfigIDAndRPM(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"api_keys":[{"key":"sk-x","rpm":30,"disabled":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := c.APIKeys[0]
+	if !strings.HasPrefix(k.ID, "k_") || k.RPM != 30 || !k.Disabled {
+		t.Fatalf("api_keys[0]=%+v", k)
+	}
+	if _, err := ParseConfig([]byte(`{"api_keys":[{"key":"sk-x","rpm":-1}]}`)); err == nil {
+		t.Error("负 rpm 必须 fail fast")
+	}
+	if _, err := ParseConfig([]byte(`{"api_keys":[{"id":"same","key":"a"},{"id":"same","key":"b"}]}`)); err == nil {
+		t.Error("重复 id 必须 fail fast")
+	}
+}

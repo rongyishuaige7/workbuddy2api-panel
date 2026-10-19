@@ -41,9 +41,12 @@ func VerifyBearer(r *http.Request, key string) bool {
 // 顶层 api_key 是拥有者密钥（Models 为空 = 不限模型）；api_keys 里的附加密钥
 // 可各带模型白名单，用于「把 key 给别人但只允许用某个模型」。
 type Policy struct {
-	Key    string   // 密钥原文（仅内存；不写日志）
-	Name   string   // 标识（日志/排障用，可为空）
-	Models []string // 允许的模型 id；空 = 不限
+	ID       string   // 稳定标识（统计/限速按它聚合；轮换密钥值不变）
+	Key      string   // 密钥原文（仅内存；不写日志）
+	Name     string   // 标识（日志/排障用，可为空）
+	Models   []string // 允许的模型 id；空 = 不限
+	RPM      int      // 每分钟请求上限；0 = 不限
+	Disabled bool     // 已禁用：鉴权命中但拒绝服务（403 key_disabled）
 }
 
 // Unrestricted 是否不限制模型。
@@ -80,7 +83,7 @@ func Resolve(r *http.Request, ownerKey string, keys []Policy) (Policy, bool) {
 	var hit Policy
 	found := false
 	if ownerKey != "" && subtle.ConstantTimeCompare(digest(tok), digest(ownerKey)) == 1 {
-		hit, found = Policy{Name: "owner"}, true
+		hit, found = Policy{ID: "owner", Name: "owner"}, true
 	}
 	for _, k := range keys {
 		if k.Key == "" {
