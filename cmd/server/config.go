@@ -25,6 +25,10 @@ type Config struct {
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
+		// APIKey 面板独立鉴权密钥（/panel/api/*）。空 = 回落顶层 api_key，保持
+		// 既有单密钥部署的兼容；非空时把「调用 API」与「管理面板」拆成两把密钥，
+		// 这样把 api_key 发给他人只授予 /v1 调用权，不附带删号/改配置的管理权。
+		APIKey string `json:"api_key"`
 	} `json:"panel"`
 
 	Logging struct {

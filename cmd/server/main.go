@@ -231,9 +231,10 @@ func main() {
 
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
 	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
-	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
+	// live 承载可热改字段（api_key / panel.api_key / soft_rate / 脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
+		PanelAPIKey:          cfg.Panel.APIKey,
 		SoftCooldown:         cfg.SoftRateDur,
 		GlobalSoftCooldown:   cfg.GlobalSoftRateDur,
 		GlobalWafCooldown:    cfg.GlobalWafRateDur,
@@ -276,6 +277,7 @@ func main() {
 		Scheduler:   sch,
 		AuthDir:     cfg.AuthDir,
 		APIKey:      cfg.APIKey,
+		PanelAPIKey: cfg.Panel.APIKey,
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
 		Version:     appVersion,
@@ -496,6 +498,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
+		PanelAPIKey:          newCfg.Panel.APIKey,
 		SoftCooldown:         newCfg.SoftRateDur,
 		GlobalSoftCooldown:   newCfg.GlobalSoftRateDur,
 		GlobalWafCooldown:    newCfg.GlobalWafRateDur,
@@ -544,7 +547,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 //   - logging.request_archive_*（Recorder 构造参数）
 //   - server.read_timeout（http.Server 构造参数）
 //
-// 热生效字段（api_key / cooldown.soft_rate / features.sanitize /
+// 热生效字段（api_key / panel.api_key / cooldown.soft_rate / features.sanitize /
 // logging.request_client_info / pool.* / schedule.*）不在本清单内，改了立即生效。
 func restartRequiredFields(oldCfg, newCfg *Config) []string {
 	if newCfg == nil {

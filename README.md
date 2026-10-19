@@ -355,7 +355,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `listen` | `:7863` | HTTP 监听地址 |
-| `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
+| `api_key` | 空 | 网关鉴权密钥（`/v1/*`、`/status`）；**空 = 不鉴权直接放行**（公网必须设置） |
+| `panel.api_key` | 空 | 面板独立鉴权密钥（`/panel/api/*`）；空 = 回落 `api_key`。与 `api_key` 分开后，把 `api_key` 发给他人只授予调用权，不附带删号/改配置的管理权 |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
@@ -635,7 +636,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 http://127.0.0.1:7863/panel/
 ```
 
-鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用。
+鉴权：`panel.api_key` 非空时面板用这把独立密钥（浏览器 localStorage 记住）；为空则回落 `api_key`（与 API 同口径）。把 `api_key` 发给他人时建议设置独立的 `panel.api_key`，否则对方同时获得面板管理权限；两者都为空时直接可用。
 界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航七个视图：
 
 | 视图 | 功能 |

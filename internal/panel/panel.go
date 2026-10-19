@@ -37,9 +37,11 @@ type Config struct {
 	Upstream  *upstream.Client
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
-	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
-	RedisMode string               // "upstash" / "noop"，仅观测透出
-	Version   string               // 面板版本号（展示用）
+	APIKey    string               // 网关密钥，面板密钥为空时回落；与 Live 同时给出时 Live 优先
+	// PanelAPIKey 面板独立密钥；空 = 回落 APIKey（兼容单密钥部署）。
+	PanelAPIKey string
+	RedisMode   string // "upstash" / "noop"，仅观测透出
+	Version     string // 面板版本号（展示用）
 
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
@@ -211,10 +213,18 @@ func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// apiKey 当前生效密钥（Live 优先，回落静态字段）。
+// apiKey 当前生效的面板密钥：优先 panel.api_key，空则回落网关 api_key。
+// Live 快照优先于静态字段（面板里改了密钥，下一个请求即用新值）。
 func (p *Panel) apiKey() string {
 	if p.cfg.Live != nil {
-		return p.cfg.Live.Load().APIKey
+		s := p.cfg.Live.Load()
+		if s.PanelAPIKey != "" {
+			return s.PanelAPIKey
+		}
+		return s.APIKey
+	}
+	if p.cfg.PanelAPIKey != "" {
+		return p.cfg.PanelAPIKey
 	}
 	return p.cfg.APIKey
 }

@@ -15,7 +15,8 @@ import (
 
 // Snapshot 一次读取的不可变配置视图。
 type Snapshot struct {
-	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权
+	APIKey               string        // 网关（/v1、/status）鉴权密钥；空 = 不鉴权
+	PanelAPIKey          string        // 面板独立鉴权密钥；空 = 回落 APIKey
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	GlobalSoftCooldown   time.Duration // global 域 429/14003 冷却基数（0 = 不冷却）
 	GlobalWafCooldown    time.Duration // global 域 WAF 403 冷却基数（0 = 不冷却）

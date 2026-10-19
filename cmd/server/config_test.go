@@ -859,3 +859,16 @@ func TestServerReadTimeout(t *testing.T) {
 		t.Error("unparsable read_timeout should fail fast")
 	}
 }
+
+func TestPanelAPIKeyConfig(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"listen":":9999","api_key":"a","panel":{"api_key":"p"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.APIKey != "a" || c.Panel.APIKey != "p" {
+		t.Errorf("api_key=%q panel.api_key=%q", c.APIKey, c.Panel.APIKey)
+	}
+}

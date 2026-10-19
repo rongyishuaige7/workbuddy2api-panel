@@ -1529,6 +1529,7 @@ $('btnLogPin').onclick = () => {
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
   listen: ['listen'], api_key: ['api_key'],
+  panel_api_key: ['panel', 'api_key'],
   package_detail_limit: ['panel', 'package_detail_limit'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
@@ -1566,8 +1567,11 @@ const CFG_MAP = {
  *
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
+ *
+ * panel_api_key 可清空：清空 = 明确要求回落到 api_key，不会关闭鉴权
+ * （api_key 本身仍受保护），且与输入框"留空 = 沿用 API 密钥"的提示一致。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file']);
+const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'panel_api_key']);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
@@ -1646,6 +1650,12 @@ $('btnEye').onclick = () => {
   el.type = show ? 'text' : 'password';
   $('btnEye').textContent = show ? '隐藏' : '显示';
 };
+$('btnEyePanel').onclick = () => {
+  const el = $('cfgPanelKey');
+  const show = el.type === 'password';
+  el.type = show ? 'text' : 'password';
+  $('btnEyePanel').textContent = show ? '隐藏' : '显示';
+};
 $('btnCfgReload').onclick = loadConfig;
 $('cfgForm').onsubmit = async ev => {
   ev.preventDefault();
@@ -1669,7 +1679,8 @@ $('cfgForm').onsubmit = async ev => {
       : restart.join('、');
     toast(restart.length ? '配置已保存；需重启生效：' + names : '配置已保存并立即生效', 'ok');
     // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
-    const k = $('cfgKey').value.trim();
+    // 面板鉴权优先用面板密钥；未填（= 回落 API 密钥）时用 API 密钥。
+    const k = $('cfgPanelKey').value.trim() || $('cfgKey').value.trim();
     if (k) localStorage.setItem(LS_KEY, k);
     loadConfig();
     loadOverview(true);
