@@ -1762,33 +1762,35 @@ function renderKeys() {
     const models = (k.models && k.models.length)
       ? k.models.map(m => '<code>' + esc(m) + '</code>').join(' ')
       : '<span class="note">全部</span>';
+    const modelsTitle = (k.models && k.models.length) ? k.models.join(', ') : '全部模型';
     const state = k.disabled ? '<span class="tag bad">已禁用</span>' : '<span class="tag ok">启用</span>';
     const tokens = Number(st.prompt_tokens || 0) + Number(st.completion_tokens || 0);
     return '<tr data-id="' + esc(k.id) + '">' +
-      '<td>' + (k.name ? esc(k.name) : '<span class="note">—</span>') + '</td>' +
-      '<td><code class="key-mask">' + esc(maskKey(k.key)) + '</code> ' +
-        '<button class="xs" data-act="reveal">显示</button> ' +
-        '<button class="xs" data-act="copy">复制</button></td>' +
-      '<td>' + models + '</td>' +
+      '<td class="k-name"><span class="clip" title="' + esc(k.name || '') + '">' +
+        (k.name ? esc(k.name) : '<span class="note">—</span>') + '</span></td>' +
+      '<td class="k-key"><span class="key-cell"><code class="key-mask">' + esc(maskKey(k.key)) + '</code>' +
+        '<button class="xs" data-act="reveal">显示</button>' +
+        '<button class="xs" data-act="copy">复制</button></span></td>' +
+      '<td class="k-models"><div class="clip" title="' + esc(modelsTitle) + '">' + models + '</div></td>' +
       '<td>' + (k.rpm ? esc(String(k.rpm)) + ' rpm' : '<span class="note">不限</span>') + '</td>' +
-      '<td>' + (k.daily_tokens ? fmtNum(k.daily_tokens) : '<span class="note">不限</span>') + '</td>' +
+      '<td class="num">' + (k.daily_tokens ? fmtNum(k.daily_tokens) : '<span class="note">不限</span>') + '</td>' +
       '<td>' + state + '</td>' +
       '<td>' + (k.capture_prompts ? '<span class="tag ok">记录</span>' : '<span class="note">—</span>') +
         (Number(k.prompt_count || 0) ? ' <span class="note">' + fmtNum(k.prompt_count) + ' 条</span>' : '') + '</td>' +
-      '<td>' + fmtNum(st.today_requests) + '</td>' +
-      '<td>' + fmtNum(st.today_tokens) + '</td>' +
-      '<td>' + fmtNum(st.requests) + '</td>' +
-      '<td>' + fmtNum(tokens) + '</td>' +
-      '<td>' + fmtNum(st.errors) + '</td>' +
+      '<td class="num">' + fmtNum(st.today_requests) + '</td>' +
+      '<td class="num">' + fmtNum(st.today_tokens) + '</td>' +
+      '<td class="num">' + fmtNum(st.requests) + '</td>' +
+      '<td class="num">' + fmtNum(tokens) + '</td>' +
+      '<td class="num">' + fmtNum(st.errors) + '</td>' +
       '<td>' + fmtWhen(st.last_used) + '</td>' +
-      '<td class="acts">' +
+      '<td class="c-acts"><div class="acts">' +
         '<button class="xs" data-act="usage">用量</button>' +
         '<button class="xs" data-act="prompts">提示词</button>' +
         '<button class="xs" data-act="edit">编辑</button>' +
         '<button class="xs" data-act="toggle">' + (k.disabled ? '启用' : '禁用') + '</button>' +
         '<button class="xs" data-act="rotate">轮换</button>' +
         '<button class="xs danger" data-act="remove">删除</button>' +
-      '</td></tr>';
+      '</div></td></tr>';
   }).join('');
 }
 
