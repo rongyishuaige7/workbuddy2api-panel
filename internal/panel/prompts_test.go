@@ -122,3 +122,23 @@ func TestKeyPromptsFreshViewAPI(t *testing.T) {
 		t.Fatalf("fresh API returned incorrect view: %s", w.Body.String())
 	}
 }
+
+func TestEmptyPromptViewsReturnAnArray(t *testing.T) {
+	rec := promptlog.New(promptlog.Config{Dir: t.TempDir()})
+	defer rec.Close()
+	p := New(Config{APIKey: "admin", PromptLog: rec, ListAPIKeys: func() ([]APIKeyView, error) { return []APIKeyView{{ID: "empty"}}, nil }})
+	for _, role := range []string{"fresh", "real", "user", "all"} {
+		req := httptest.NewRequest("GET", "/panel/api/keys/empty/prompts?role="+role, nil)
+		req.Header.Set("Authorization", "Bearer admin")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, req)
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		entries, ok := body["entries"].([]any)
+		if w.Code != 200 || !ok || len(entries) != 0 {
+			t.Errorf("role=%s must return entries:[], got %s", role, w.Body.String())
+		}
+	}
+}

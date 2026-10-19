@@ -199,6 +199,9 @@ def recover(args, manifest, stop_job=True):
     if (args.release / 'success.json').exists():
         print('release already healthy; recovery is a no-op')
         return
+    if (args.release / 'recovered.json').exists():
+        print('release already recovered; recovery is a no-op')
+        return
     if not (args.release / 'started.json').exists():
         print('activation never started; prior service remains untouched')
         return
@@ -210,6 +213,7 @@ def recover(args, manifest, stop_job=True):
     health = wait_probe(args.base, manifest['old_version'])
     if not (args.release / 'recovered.json').exists():
         save(args.release / 'recovered.json', {'health': health, 'configuration_preserved': True, 'archives_preserved': True})
+    run('systemctl', 'stop', manifest['recovery_unit'] + '.timer', timeout=10)
     print(json.dumps({'recovered': True, 'health': health}))
 
 

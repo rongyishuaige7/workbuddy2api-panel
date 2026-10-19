@@ -9,7 +9,8 @@ import (
 // FilterEntries builds a view without modifying archived message objects.
 // Fresh comparisons use complete pre-truncation identities within each key/session.
 func FilterEntries(entries []Entry, mode string) []Entry {
-	out := append([]Entry(nil), entries...)
+	out := make([]Entry, len(entries))
+	copy(out, entries)
 	if mode != "fresh" && mode != "real" && mode != "user" {
 		return out
 	}

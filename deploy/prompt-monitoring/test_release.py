@@ -66,7 +66,11 @@ class ReleaseSafetyTests(unittest.TestCase):
         self.assertEqual(json.loads((self.base / 'config.json').read_text()), {'new_operator_setting':True})
         self.assertEqual(new_archive.read_text(), 'new captures')
         self.assertTrue((self.folder / 'recovered.json').exists())
-        self.assertEqual(run.call_args_list[-1].args, ('systemctl','restart',release.SERVICE))
+        self.assertIn(('systemctl','restart',release.SERVICE), [c.args for c in run.call_args_list])
+        self.assertEqual(run.call_args_list[-1].args, ('systemctl','stop','test-recovery.timer'))
+        with patch.object(release, 'run') as second:
+            release.recover(self.args, self.manifest)
+        second.assert_not_called()
 
     def test_successful_activation_cannot_be_reverted_by_late_timer(self):
         (self.folder / 'success.json').write_text('{}')
