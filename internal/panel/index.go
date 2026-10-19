@@ -9,7 +9,9 @@
 package panel
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"net/http"
 )
 
@@ -40,23 +42,41 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff") // 禁 MIME 嗅探
 	w.Header().Set("X-Frame-Options", "DENY")           // 老浏览器兜底（CSP frame-ancestors 的等价项）
 	w.Header().Set("Referrer-Policy", "no-referrer")    // 不外泄面板地址给外部站点
-	w.Header().Set("Cache-Control", "no-store")         // 面板/接口不缓存，避免看到过期的空列表
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+}
+
+// 静态资源 ETag：内容变化（重新构建）时自动变化，浏览器可带 If-None-Match
+// 复用缓存，只回 304，避免每次打开面板都重下 ~270KB 的 HTML + JS。
+var (
+	indexETag = etagOf(indexHTML)
+	appETag   = etagOf(appJS)
+)
+
+func etagOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return `"` + hex.EncodeToString(sum[:8]) + `"`
+}
+
+func writeStatic(w http.ResponseWriter, r *http.Request, tag, ctype string, body []byte) {
+	w.Header().Set("ETag", tag)
+	w.Header().Set("Content-Type", ctype)
+	if r.Header.Get("If-None-Match") == tag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // index 输出面板页面（静态无秘密；数据接口 /panel/api/* 才走鉴权）。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(indexHTML)
+	writeStatic(w, r, indexETag, "text/html; charset=utf-8", indexHTML)
 }
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(appJS)
+	writeStatic(w, r, appETag, "text/javascript; charset=utf-8", appJS)
 }

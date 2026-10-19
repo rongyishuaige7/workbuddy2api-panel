@@ -44,11 +44,21 @@ async function api(path, opts = {}) {
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
-  const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
-  if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-  return d;
+  const ctrl = new AbortController();
+  const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 30000;
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h, signal: opts.signal || ctrl.signal }));
+    if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    return d;
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('请求超时（' + Math.round(timeoutMs / 1000) + 's）');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 function toast(msg, cls) {
   const el = document.createElement('div');
@@ -1340,23 +1350,9 @@ $('logChips').addEventListener('click', ev => {
 async function loadLogs() {
   const box = $('logBox');
   const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
-  const limit = ($('reqLimit') && $('reqLimit').value) || 100;
-  // 时间范围由归档侧过滤（不是前端筛已拉取的条目）：区间落在更早的时间段时，
-  // 「最近 N 条」里根本不会有那些记录，必须让服务端按时间取。
-  const rq = trangeQuery('reqRange', false);
-  rq.set('limit', limit);
+  // 运行日志与请求记录分开加载：任一接口慢/失败都不阻塞另一块渲染。
   try {
-    const [d, metrics, requestRows] = await Promise.all([
-      api('logs'),
-      api('request_metrics').catch(() => ({})),
-      api('request_logs?' + rq.toString()).catch(() => ({ entries: [] })),
-    ]);
-    // 归档开启时以归档为准——「区间内没有记录」是一个真实结果，不能回落成内存里
-    // 的最近 100 条（那会把筛选条件之外、时间范围之外的请求显示出来）。
-    // 只有归档关闭时才回落到内存指标，保证没有归档的部署仍能看到最近请求。
-    const archiveOn = !!(metrics && metrics.archive && metrics.archive.enabled);
-    const recent = archiveOn ? (requestRows.entries || []) : (metrics.recent || []);
-    renderRequestMetrics(metrics, recent);
+    const d = await api('logs', { timeoutMs: 15000 });
     const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
     box.innerHTML = entries.length
       ? entries.map(e => {
@@ -1372,7 +1368,25 @@ async function loadLogs() {
     $('logNote').textContent = logCh === 'all'
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
-  } catch (e) { /* 概览已提示 */ }
+  } catch (e) {
+    toast('运行日志加载失败：' + e.message, 'err');
+  }
+
+  const limit = ($('reqLimit') && $('reqLimit').value) || 100;
+  const rq = trangeQuery('reqRange', false);
+  rq.set('limit', limit);
+  const [mRes, rRes] = await Promise.allSettled([
+    api('request_metrics', { timeoutMs: 15000 }),
+    api('request_logs?' + rq.toString(), { timeoutMs: 30000 }),
+  ]);
+  const metrics = mRes.status === 'fulfilled' ? mRes.value : {};
+  const requestRows = rRes.status === 'fulfilled' ? rRes.value : { entries: [] };
+  if (mRes.status === 'rejected') toast('请求指标加载失败：' + mRes.reason.message, 'err');
+  if (rRes.status === 'rejected') toast('请求记录加载失败：' + rRes.reason.message, 'err');
+  const archiveOn = !!(metrics && metrics.archive && metrics.archive.enabled);
+  const recent = archiveOn ? (requestRows.entries || []) : (metrics.recent || []);
+  renderRequestMetrics(metrics, recent);
+  if (rRes.status === 'rejected') $('reqNote').textContent = '请求记录加载失败：' + rRes.reason.message;
 }
 
 function renderRequestMetrics(m, entries) {

@@ -221,6 +221,11 @@ func (p *Panel) routes() {
 // 与 401 错误响应全都带上（API 也可能在浏览器里被直接打开）。
 func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	if strings.HasPrefix(r.URL.Path, "/panel/api/") {
+		w.Header().Set("Cache-Control", "no-store") // 数据接口不缓存，避免看到过期列表
+	} else {
+		w.Header().Set("Cache-Control", "no-cache") // 静态资源用 ETag 重新校验（304）
+	}
 	p.mux.ServeHTTP(w, r)
 }
 
