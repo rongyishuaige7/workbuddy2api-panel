@@ -201,6 +201,9 @@ type Config struct {
 		DeviceTokenFile string `json:"device_token_file"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// WAFV2TTLSeconds global 账号在 /console 命中 WAF 且 /v2 回退成功后，
+		// 在该秒数内优先走 /v2；0 = 关闭（默认，保持旧行为）。仅影响 global。
+		WAFV2TTLSeconds int `json:"waf_v2_ttl_seconds"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -492,6 +495,11 @@ func applyEnv(c *Config) {
 			c.Upstream.PassthroughIP = b
 		}
 	}
+	if v := os.Getenv("WB2A_WAF_V2_TTL_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Upstream.WAFV2TTLSeconds = n
+		}
+	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
@@ -706,6 +714,12 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
+	}
+	if c.Upstream.WAFV2TTLSeconds < 0 {
+		c.Upstream.WAFV2TTLSeconds = 0
+	}
+	if c.Upstream.WAFV2TTLSeconds > 86400 {
+		c.Upstream.WAFV2TTLSeconds = 86400
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen

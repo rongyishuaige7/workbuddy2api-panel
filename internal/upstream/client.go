@@ -663,6 +663,15 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
 	IdleTimeout time.Duration
 
+	// WAFV2TTL 账号级 WAF 记忆：global 账号在 /console 命中 WAF 且 /v2 回退
+	// 成功后，TTL 内该账号优先走 /v2，避免每次先撞 /console 的 WAF。
+	// 0 = 关闭（默认，保持旧行为）。只影响 global；cn 仍固定 /v2。
+	WAFV2TTL time.Duration
+
+	wafMu      sync.Mutex
+	wafV2Until map[string]time.Time
+	nowFunc    func() time.Time
+
 	// effortsMu/efforts 缓存各模型 supportedEfforts（FetchModels 刷新），供请求体 effort 降级。
 	// 按 realm 分层桶（cn/global）：同模型名跨域探测的 effort 集合可能不同，
 	// 混桶会互相污染（C-2）。
@@ -798,11 +807,76 @@ const (
 //	规则直接变成 503。路径回退只对 ErrWafBlock 生效，其他 4xx 立即返回）。
 //
 // cn → [/v2/chat/completions]（单元素，保持现状）。
+// 若账号处于 WAF 后的 /v2 优先窗口，global 顺序反转为 [/v2, /console]。
 func (c *Client) chatPaths(a *auth.Auth) []string {
 	if c.globalOn(a) {
+		if c.preferV2(a) {
+			return []string{chatCompletionsPath, consoleChatCompletionsPath}
+		}
 		return []string{consoleChatCompletionsPath, chatCompletionsPath}
 	}
 	return []string{chatCompletionsPath}
+}
+
+func (c *Client) now() time.Time {
+	if c.nowFunc != nil {
+		return c.nowFunc()
+	}
+	return time.Now()
+}
+
+// preferV2 判断账号是否处于 WAF 后的 /v2 优先窗口。过期项顺手删除。
+func (c *Client) preferV2(a *auth.Auth) bool {
+	if c.WAFV2TTL <= 0 || a == nil || a.UID == "" {
+		return false
+	}
+	c.wafMu.Lock()
+	defer c.wafMu.Unlock()
+	until, ok := c.wafV2Until[a.UID]
+	if !ok {
+		return false
+	}
+	if c.now().Before(until) {
+		return true
+	}
+	delete(c.wafV2Until, a.UID)
+	return false
+}
+
+// markV2 记录账号的 WAF 偏好。只在 /console WAF 后 /v2 回退成功时调用，
+// 避免把 /v2 本身不可用的账号也切过去。
+func (c *Client) markV2(a *auth.Auth) {
+	if c.WAFV2TTL <= 0 || a == nil || a.UID == "" {
+		return
+	}
+	c.wafMu.Lock()
+	defer c.wafMu.Unlock()
+	if c.wafV2Until == nil {
+		c.wafV2Until = make(map[string]time.Time)
+	}
+	if len(c.wafV2Until) > 512 {
+		now := c.now()
+		for uid, until := range c.wafV2Until {
+			if !now.Before(until) {
+				delete(c.wafV2Until, uid)
+			}
+		}
+	}
+	c.wafV2Until[a.UID] = c.now().Add(c.WAFV2TTL)
+	log.Printf("INFO: [upstream] chat_stream acct=%s: WAF fallback succeeded, prefer /v2 for %s",
+		logfmt.Label(a.UID, a.Nickname), c.WAFV2TTL)
+}
+
+func (c *Client) clearV2(a *auth.Auth) {
+	if a == nil || a.UID == "" {
+		return
+	}
+	c.wafMu.Lock()
+	defer c.wafMu.Unlock()
+	if _, ok := c.wafV2Until[a.UID]; ok {
+		delete(c.wafV2Until, a.UID)
+		log.Printf("INFO: [upstream] chat_stream acct=%s: clear /v2 WAF preference", logfmt.Label(a.UID, a.Nickname))
+	}
 }
 
 // billing 域端点路径（billingBase + path）。balance/checkin 与 report（report.go）同域，
@@ -1073,8 +1147,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string, meta Cha
 // 原文）。判定为 ErrNone 的响应（理论上不存在，防御）err 为 nil，handler 按
 // respBody 自行兜底。
 //
-// global chat 自 #119 实测后固定走 /v2（chat 层无 fallback 链；billing 层的 404
-// fallback 独立存在，语义不受影响）。ensureConsoleSystem 在 prepareBody 后统一套用
+// global chat 默认 /console 优先，WAF 403 时同请求回退 /v2；配置
+// upstream.waf_v2_ttl_seconds>0 时，回退成功的账号在 TTL 内优先 /v2。
+// billing 层的 404 fallback 独立存在，语义不受影响。ensureConsoleSystem 在 prepareBody 后统一套用
 // 全局脚本：首条消息非 system 时前置兜底 system（防 console 域上游 code 11-128；
 // #119 后 global 出站固定 /v2，该兜底保留——上游对 /v2 是否需要 system 无实测
 // 反证，删了无回滚路径）。
@@ -1133,6 +1208,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+			// 已处于 /v2 优先的账号若在 /v2 上遇到渠道/参数错误，撤销偏好并回退
+			// /console；不能把一次 /v2 的 11-128 直接变成账号故障。
+			if path == chatCompletionsPath && c.preferV2(a) && (kind == ErrChannel || kind == ErrBadParams || kind == ErrAccountFault) {
+				c.clearV2(a)
+				if i+1 < len(paths) {
+					log.Printf("WARN: [upstream] chat_stream acct=%s: %s on /v2, fallback via %s",
+						logfmt.Label(a.UID, a.Nickname), kind, paths[i+1])
+					continue
+				}
+			}
 			// 回退路径若返回渠道/参数/账号授权类错误，保留原始 WAF：/v2 对部分凭证会
 			// 返回 11-128「request illegal」，这不是账号问题，也不该让 handler 按 400
 			// 终止轮转。其余错误（429/5xx）保留回退路径的新错误，信息更具体。
@@ -1144,18 +1229,24 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			// global WAF 403 路径回退：同一请求体改走 /v2/chat/completions 再试一次。
 			// WAF 可能按路径/边缘规则拦截；/console 被拦时 /v2 仍可能放行。只对
 			// ErrWafBlock 生效，其他 4xx 立即返回（避免把参数/渠道错误重放一遍）。
-			if kind == ErrWafBlock && i+1 < len(paths) {
-				if wafFallback == nil {
-					wafFallback = &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
-					if d, ok := ParseRetryAfter(resp.Header); ok {
-						wafFallback.RetryAfter = d
-					}
-					wafFallbackRaw = raw
-					wafFallbackStatus = resp.StatusCode
+			if kind == ErrWafBlock {
+				// /v2 优先的账号反被 /v2 WAF：撤销偏好，下次回到 /console。
+				if path == chatCompletionsPath && c.preferV2(a) {
+					c.clearV2(a)
 				}
-				log.Printf("WARN: [upstream] chat_stream acct=%s: WAF on %s, retry via %s",
-					logfmt.Label(a.UID, a.Nickname), path, paths[i+1])
-				continue
+				if i+1 < len(paths) {
+					if wafFallback == nil {
+						wafFallback = &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+						if d, ok := ParseRetryAfter(resp.Header); ok {
+							wafFallback.RetryAfter = d
+						}
+						wafFallbackRaw = raw
+						wafFallbackStatus = resp.StatusCode
+					}
+					log.Printf("WARN: [upstream] chat_stream acct=%s: WAF on %s, retry via %s",
+						logfmt.Label(a.UID, a.Nickname), path, paths[i+1])
+					continue
+				}
 			}
 			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析）：
 			// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
@@ -1173,6 +1264,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
 		if meta.ObserveResponse != nil {
 			meta.ObserveResponse(prepared, responseTrace(resp.Header, nil))
+		}
+		// /console 被 WAF 后 /v2 成功：记住该账号，后续 TTL 内直接走 /v2。
+		if c.globalOn(a) && path == chatCompletionsPath && wafFallback != nil {
+			c.markV2(a)
 		}
 		return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 	}
