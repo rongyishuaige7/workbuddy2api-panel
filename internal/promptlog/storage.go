@@ -409,13 +409,13 @@ func (r *Recorder) CountSnapshot() (map[string]int, error) {
 	r.countMu.Lock()
 	defer r.countMu.Unlock()
 	r.mu.Lock()
-	if r.counts != nil && time.Since(r.countsAt) < 10*time.Second {
+	if r.counts != nil {
 		out := copyCounts(r.counts)
 		r.mu.Unlock()
 		return out, nil
 	}
 	r.mu.Unlock()
-	files, gen, err := r.snapshot()
+	files, _, err := r.snapshot()
 	if err != nil {
 		return nil, err
 	}
@@ -436,10 +436,8 @@ func (r *Recorder) CountSnapshot() (map[string]int, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.generation == gen {
-		r.counts = copyCounts(counts)
-		r.countsAt = time.Now()
-	}
+	r.counts = copyCounts(counts)
+	r.countsAt = time.Now()
 	return counts, nil
 }
 
@@ -534,6 +532,57 @@ func rewriteFile(path string, keep func(rowHeader) bool) (removed int, resultErr
 	return n, err
 }
 
+// retireFileLocked removes a closed archive and, when counts are warm, subtracts
+// its per-key rows so the keys list does not need to rescan the whole archive.
+func (r *Recorder) retireFileLocked(path string) error {
+	var delta map[string]int
+	if r.counts != nil {
+		delta, _ = r.countFileLocked(path)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	r.generation++
+	if r.counts == nil {
+		return nil
+	}
+	if delta == nil {
+		r.counts = nil
+		return nil
+	}
+	for k, v := range delta {
+		if r.counts[k] <= v {
+			delete(r.counts, k)
+		} else {
+			r.counts[k] -= v
+		}
+	}
+	return nil
+}
+
+func (r *Recorder) countFileLocked(path string) (map[string]int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	out := make(map[string]int)
+	reader := bufio.NewReaderSize(f, 64<<10)
+	if err := walkLines(reader, func(line []byte, _ int64) error {
+		h, err := parseHeader(line)
+		if err != nil {
+			return nil // damaged row: skip count
+		}
+		if h.KeyID != "" {
+			out[h.KeyID]++
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Start tightens existing permissions and starts retention even if capture is off.
 func (r *Recorder) Start() error {
 	if r == nil || r.cfg.Dir == "" {
@@ -584,6 +633,9 @@ func (r *Recorder) Start() error {
 			}
 		}
 	}()
+	// Warm counts in the background so the first panel keys list does not pay
+	// for a full archive scan on a large (hundreds of MB) history.
+	go func() { _, _ = r.CountSnapshot() }()
 	return nil
 }
 func (r *Recorder) Close() {
@@ -632,11 +684,9 @@ func (r *Recorder) pruneLocked(now time.Time) error {
 			return err
 		}
 		if f.day < cutoff && f.path != active {
-			if err := os.Remove(f.path); err != nil {
+			if err := r.retireFileLocked(f.path); err != nil {
 				return err
 			}
-			r.generation++
-			r.counts = nil
 			continue
 		}
 		sizes[f.path] = info.Size()
@@ -648,12 +698,10 @@ func (r *Recorder) pruneLocked(now time.Time) error {
 		if !exists || f.path == active {
 			continue
 		}
-		if err := os.Remove(f.path); err != nil {
+		if err := r.retireFileLocked(f.path); err != nil {
 			return err
 		}
 		total -= size
-		r.generation++
-		r.counts = nil
 	}
 	return nil
 }
