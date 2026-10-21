@@ -949,3 +949,10 @@ func TestPromptCaptureDefaults(t *testing.T) {
 		t.Error("capture_prompts should parse")
 	}
 }
+
+func TestIdentityScrubDefaultOff(t *testing.T) {
+	c := Default()
+	if c.Upstream.IdentityScrubEnabled {
+		t.Fatal("identity_scrub_enabled must default to false")
+	}
+}

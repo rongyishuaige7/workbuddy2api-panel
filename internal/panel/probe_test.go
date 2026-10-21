@@ -294,3 +294,38 @@ func TestModelChatTaskHonorsAccountCapacity(t *testing.T) {
 		t.Fatal("full account accepted chat task")
 	}
 }
+
+// TestProbeBodyIncludesIdentity 测活必须带真实 agent 的 developer 身份句，
+// 否则 11-128 渠道校验会被最小 body 绕过，测活结果不可信。
+func TestProbeBodyIncludesIdentity(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n")
+	}))
+	defer srv.Close()
+
+	upClient := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, IdleTimeout: 5 * time.Second}
+	pl := pool.New("")
+	a := &auth.Auth{UID: "u1", Nickname: "Nick1", AccessToken: "good-token", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	pl.Add(a)
+	pnl := New(Config{Pool: pl, Upstream: upClient, APIKey: "secret"})
+
+	req := httptest.NewRequest("POST", "/panel/api/accounts/u1/probe?model=deepseek-v4.1-flash", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	pnl.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("probe code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(got, "You are an AI agent powered by DeepSeek Harness.") {
+		t.Fatalf("probe body missing identity: %s", got)
+	}
+	if !strings.Contains(got, `"role":"developer"`) && !strings.Contains(got, `"role": "developer"`) {
+		// prepareBody 可能把 developer 规范为 system；至少确认身份句在 body 里。
+		t.Logf("developer role normalized; body=%s", got)
+	}
+}

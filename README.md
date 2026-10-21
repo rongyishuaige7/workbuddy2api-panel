@@ -388,6 +388,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
+| `upstream.identity_scrub_enabled` | `false` | 清洗 system/developer/assistant 中的 harness 身份句（如 `You are an AI agent powered by DeepSeek Harness.`），user/tool 不动；用于上游 11-128 渠道校验场景，开启前评估账号风险 |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 默认 `WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1`；global 账号平台段为 `WorkBuddy AI`）。官网「使用端」列按出站 UA 服务端归因，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `prompt.mode` | `passthrough` | 系统提示词模式：`passthrough`（默认）= 透传客户端原始 system；`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）。`passthrough` / `append` 遇拦截会自动降级重试 |

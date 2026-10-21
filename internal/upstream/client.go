@@ -689,6 +689,11 @@ type Client struct {
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
 
+	// IdentityScrub 出站消息身份句清洗开关（默认 false）：仅清洗
+	// system/developer/assistant，user/tool 原样保留。用于上游渠道校验
+	// 按 system prompt 身份句拦截 11-128 的场景；默认关闭。
+	IdentityScrub bool
+
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	// 面板保存配置热改 + chat 热路径并发读写，用 atomic.Bool 消除数据竞争。
 	SanitizeFingerprints atomic.Bool
@@ -925,6 +930,9 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
 	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
+	if c.IdentityScrub {
+		body = ScrubIdentityMessages(body)
+	}
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)

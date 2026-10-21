@@ -180,9 +180,12 @@ func (p *Panel) runAccountProbe(ctx context.Context, a *auth.Auth, model string)
 		return res
 	}
 
+	// 测活必须覆盖真实 agent 的 developer 身份句：只发 user "1" 的最小 body
+	// 会绕过上游 11-128 渠道校验，测活显示可用但真实 chat 全失败。
 	body, err := json.Marshal(map[string]any{
 		"model": bareModel,
 		"messages": []map[string]any{
+			{"role": "developer", "content": "You are an AI agent powered by DeepSeek Harness."},
 			{"role": "user", "content": "1"},
 		},
 		"max_tokens": 3,

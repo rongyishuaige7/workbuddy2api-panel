@@ -201,6 +201,10 @@ type Config struct {
 		DeviceTokenFile string `json:"device_token_file"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// IdentityScrubEnabled 出站消息身份句清洗（默认 false）：仅清洗
+		// system/developer/assistant，user/tool 不动。用于上游按 system prompt
+		// 身份句拦截 11-128 的场景；开启属于规避上游渠道校验，需自行评估风险。
+		IdentityScrubEnabled bool `json:"identity_scrub_enabled"`
 		// WAFV2TTLSeconds global 账号在 /console 命中 WAF 且 /v2 回退成功后，
 		// 在该秒数内优先走 /v2；0 = 关闭（默认，保持旧行为）。仅影响 global。
 		WAFV2TTLSeconds int `json:"waf_v2_ttl_seconds"`
@@ -493,6 +497,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.PassthroughIP = b
+		}
+	}
+	if v := os.Getenv("WB2A_IDENTITY_SCRUB_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.IdentityScrubEnabled = b
 		}
 	}
 	if v := os.Getenv("WB2A_WAF_V2_TTL_SECONDS"); v != "" {
