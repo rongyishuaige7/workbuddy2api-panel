@@ -69,3 +69,33 @@ func TestPrepareBodyIdentityScrubToggle(t *testing.T) {
 		t.Fatalf("enabled must scrub: %s", on)
 	}
 }
+
+func TestScrubBrandMentionInDeveloper(t *testing.T) {
+	body := []byte(`{"messages":[
+		{"role":"developer","content":"You are interacting with the user through the DeepSeek Harness Web GUI. The apps/web Vite entry builds the shell."},
+		{"role":"user","content":"DeepSeek Harness is mentioned here."},
+		{"role":"tool","content":"DeepSeek Harness is mentioned here too."}
+	]}`)
+	out := ScrubIdentityMessages(body)
+	var obj struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range obj.Messages {
+		switch m.Role {
+		case "developer":
+			if strings.Contains(m.Content, "DeepSeek Harness") || !strings.Contains(m.Content, "agent runtime") {
+				t.Fatalf("developer brand not scrubbed: %q", m.Content)
+			}
+		case "user", "tool":
+			if !strings.Contains(m.Content, "DeepSeek Harness") {
+				t.Fatalf("%s content changed: %q", m.Role, m.Content)
+			}
+		}
+	}
+}

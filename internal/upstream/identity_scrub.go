@@ -18,6 +18,9 @@ var identityScrubPatterns = []*regexp.Regexp{
 
 // ScrubIdentityMessages 只清洗 system/developer/assistant 的文本内容；
 // user/tool 是用户数据或工具输出，不能改写。body 不可解析时原样返回。
+//
+// 上游除了身份句，还会把 `DeepSeek Harness` 品牌提及与其他 DSH 说明组合成指纹；
+// 因此允许角色内统一替换品牌词，避免只清身份句后仍被组合规则拦截。
 func ScrubIdentityMessages(body []byte) []byte {
 	if len(body) == 0 {
 		return body
@@ -80,9 +83,11 @@ func scrubIdentityContent(v any) (any, bool) {
 	return v, false
 }
 
+var brandScrubPattern = regexp.MustCompile(`(?i)DeepSeek Harness`)
+
 func scrubIdentityText(s string) string {
 	for _, re := range identityScrubPatterns {
 		s = re.ReplaceAllString(s, "You are a helpful AI assistant.")
 	}
-	return s
+	return brandScrubPattern.ReplaceAllString(s, "agent runtime")
 }
